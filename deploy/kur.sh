@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Oracle Linux sunucusuna kurulum: systemd servisi + nginx alt alan adı + parola + (varsa certbot ile) HTTPS.
+# Oracle Linux sunucusuna kurulum: systemd servisi + gecelik yedek zamanlayıcısı + nginx alt alan adı + parola +
+# (varsa certbot ile) HTTPS.
 # Yalnızca yeni dosya ekler; mevcut nginx ayarlarına dokunmaz, nginx -t geçmezse eklediğini geri alır.
 # Kullanım (repo kökünde, root olarak):  sudo bash deploy/kur.sh ceviri.fremensu.com.tr
 # Güncelleme: git pull && sudo bash deploy/kur.sh ceviri.fremensu.com.tr   (anahtar ve parola korunur)
@@ -22,7 +23,7 @@ if [ -z "$PY" ]; then dnf install -y python3.11 && PY=python3.11; fi
 # 2) Kod, sanal ortam, servis kullanıcısı
 id arapca >/dev/null 2>&1 || useradd --system --home-dir "$HEDEF" --shell /sbin/nologin arapca
 mkdir -p "$HEDEF/data"
-cp "$KAYNAK"/{app.py,llm.py,arapca_test.py,index.html,requirements.txt} "$HEDEF/"
+cp "$KAYNAK"/{app.py,llm.py,arapca_test.py,yedek.py,index.html,requirements.txt} "$HEDEF/"
 [ -x "$HEDEF/venv/bin/pip" ] || "$PY" -m venv "$HEDEF/venv"
 "$HEDEF/venv/bin/pip" install -q --upgrade pip -r "$HEDEF/requirements.txt"
 chown -R arapca:arapca "$HEDEF"
@@ -50,9 +51,36 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Gecelik yedek: SQLite çevrimiçi yedekleme API'siyle $HEDEF/data/yedek/kitap-YYYY-AA-GG.db (14 gün saklanır)
+cat > /etc/systemd/system/arapca-yedek.service <<EOF
+[Unit]
+Description=Arapca ceviri veritabani yedegi
+
+[Service]
+Type=oneshot
+User=arapca
+WorkingDirectory=$HEDEF
+EnvironmentFile=/etc/arapca.env
+Environment=ARAPCA_VERI=$HEDEF/data
+ExecStart=$HEDEF/venv/bin/python $HEDEF/yedek.py
+EOF
+cat > /etc/systemd/system/arapca-yedek.timer <<EOF
+[Unit]
+Description=Arapca ceviri veritabani yedegi (her gece)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
 systemctl daemon-reload
 systemctl enable arapca >/dev/null
 systemctl restart arapca
+systemctl enable --now arapca-yedek.timer >/dev/null
 
 # 4) nginx: parola korumalı ters vekil (uygulamanın kendi kimlik doğrulaması yok)
 if [ ! -s /etc/nginx/arapca.htpasswd ]; then
@@ -87,6 +115,8 @@ systemctl reload nginx
 sleep 2
 systemctl is-active --quiet arapca || { journalctl -u arapca -n 30 --no-pager; echo "servis ayakta değil"; exit 1; }
 curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/pages" || { echo "uygulama yanıt vermiyor"; exit 1; }
+systemctl is-active --quiet arapca-yedek.timer || { echo "yedek zamanlayıcısı etkin değil"; exit 1; }
+echo "Gecelik yedek: $HEDEF/data/yedek (elle denemek için: systemctl start arapca-yedek; journalctl -u arapca-yedek)"
 echo "Uygulama çalışıyor: http://$ALAN (DNS'te $ALAN için A kaydı bu sunucuyu göstermeli)"
 
 if command -v certbot >/dev/null; then

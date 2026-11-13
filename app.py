@@ -14,18 +14,23 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 from contextlib import closing, contextmanager
+from datetime import datetime
 from difflib import SequenceMatcher
+from itertools import groupby
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StrictBool
+from starlette.background import BackgroundTask
 
 import llm as llm_modul
+import yedek as yedek_modul
 from arapca_test import (CEVIRI_PROMPT, HAREKE, HAREKE_PROMPT, IMLA, OCR_PROMPT, OCR_SCHEMA, imla, parcali, rasm,
                          rasm_kontrol)
 
@@ -48,6 +53,9 @@ AZAMI_YONERGE = 2000  # kitabın üslup yönergesi (books.yonerge) en fazla bu k
 BELLEK_ADET, BELLEK_SINIR, BELLEK_ESIK = 3, 1500, 0.12  # çeviri belleği: örnek sayısı, toplam karakter, en az
 # benzerlik (gerçek sayfalarda aynı konudaki farklı sayfalar ≤0.09, şerh ile kendi hâşiyesi 0.10-0.16 çıktı)
 ADAY_SINIR = 20000  # sözlük adayı için gönderilen onaylı pasajların toplam karakteri
+SURUM_SINIRI = 50  # pasaj başına saklanan en fazla sürüm (en eskiler silinir)
+AZAMI_NOT = 1000  # pasaj notu en fazla bu kadar karakter
+AZAMI_SONUC, ALINTI = 100, 40  # arama: en fazla sonuç; alıntıda eşleşmenin iki yanındaki karakter
 
 SEMA = """
 CREATE TABLE IF NOT EXISTS books(
@@ -60,7 +68,13 @@ CREATE TABLE IF NOT EXISTS passages(
     id INTEGER PRIMARY KEY, page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
     sira INTEGER NOT NULL, tur TEXT NOT NULL, ar TEXT NOT NULL, ar_vocalized TEXT,
     tr TEXT NOT NULL DEFAULT '', durum TEXT NOT NULL DEFAULT 'taslak',
-    kutu TEXT, lemma TEXT, bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL, supheli TEXT, kapali TEXT);
+    kutu TEXT, lemma TEXT, bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL, supheli TEXT, kapali TEXT,
+    notu TEXT NOT NULL DEFAULT '', isaretli INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS surumler(
+    id INTEGER PRIMARY KEY, passage_id INTEGER NOT NULL REFERENCES passages(id) ON DELETE CASCADE,
+    alan TEXT NOT NULL, metin TEXT NOT NULL, neden TEXT NOT NULL,
+    zaman TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE INDEX IF NOT EXISTS surumler_pasaj ON surumler(passage_id);
 CREATE TABLE IF NOT EXISTS glossary(
     id INTEGER PRIMARY KEY, ar TEXT NOT NULL UNIQUE, tr TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usage(
@@ -75,6 +89,9 @@ CREATE INDEX IF NOT EXISTS usage_zaman ON usage(zaman);
 # şerh alıntısı; bagli_id: lemmanın bulunduğu şerh pasajı. supheli: çift okumada ayrışan kelimeler, JSON
 # [{kelime, diger, i}] (i: kelimenin pasajdaki sırası). kapali: şüpheli kuyruğunda "baktım" denen maddelerin anahtarları.
 # books.yonerge: kitaba özel üslup yönergesi (serbest metin); boş değilse çeviri ve öneri isteklerine eklenir.
+# passages.notu: kısa serbest not; isaretli: "tekrar bak" işareti (0/1). surumler: pasajın ar/tr metni her değiştiğinde
+# ÖNCEKİ metin (alan 'ar'|'tr'); neden: elle | ceviri (yeniden çeviri) | oneri (öneri kabulü) | geri (sürüme dönme) |
+# bolme (taliklere bölme). Pasaj silinince (sayfa silme, yeniden OCR) sürümleri de silinir.
 
 AGENT_PROMPT = """Aşağıda klasik Hanefî fıkıh metninden bir Arapça pasaj ve Türkçe çevirisi var.
 Çeviriyi asılla karşılaştır; yalnızca gerçek sorunlar için düzeltme öner: yanlış anlam, atlanmış ifade,
@@ -142,12 +159,14 @@ def gec(c: sqlite3.Connection):
     sutun_ekle(c, "pages", "book_id INTEGER REFERENCES books(id)")
     sutun_ekle(c, "books", "ayar TEXT NOT NULL DEFAULT '{}'", "yonerge TEXT NOT NULL DEFAULT ''")
     sutun_ekle(c, "passages", "kutu TEXT", "lemma TEXT", "bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL",
-               "supheli TEXT", "kapali TEXT")
+               "supheli TEXT", "kapali TEXT", "notu TEXT NOT NULL DEFAULT ''", "isaretli INTEGER NOT NULL DEFAULT 0")
     sahipsiz = [r["id"] for r in c.execute("SELECT id FROM pages WHERE book_id IS NULL ORDER BY no, id")]
     if sahipsiz:
         bid = c.execute("INSERT INTO books(ad, sayfa_sayisi) VALUES('Eski sayfalar', ?)", (len(sahipsiz),)).lastrowid
         c.executemany("UPDATE pages SET book_id=?, no=? WHERE id=?", [(bid, n, pid) for n, pid in enumerate(sahipsiz, 1)])
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS pages_kitap_no ON pages(book_id, no)")
+    # pasaj silinirken bagli_id (ON DELETE SET NULL) dizinsizse her silmede tablo taranır: büyük kitabı silmek karesel
+    c.execute("CREATE INDEX IF NOT EXISTS passages_bagli ON passages(bagli_id)")
 
 
 def db() -> sqlite3.Connection:
@@ -181,6 +200,34 @@ def bul(tablo: str, kimlik: int) -> dict:
     if not satir:
         raise HTTPException(404, f"{tablo} #{kimlik} bulunamadı")
     return satir[0]
+
+
+# ---------- sürüm geçmişi ----------
+def surum_ekle(c: sqlite3.Connection, p: dict, alan: dict, neden: str):
+    """alan'da değişen ar/tr'nin ÖNCEKİ metnini sürüm olarak saklar; değişmeyen ya da boş önceki metin sürüm üretmez.
+    Pasajın en eski sürümleri SURUM_SINIRI'nı aşınca silinir. Güncellemeyle aynı işlemde (c) çağrılır."""
+    eklendi = False
+    for a in ("ar", "tr"):
+        if a in alan and alan[a] != p[a] and p[a].strip():
+            c.execute("INSERT INTO surumler(passage_id, alan, metin, neden) VALUES(?,?,?,?)", (p["id"], a, p[a], neden))
+            eklendi = True
+    if eklendi:
+        c.execute("DELETE FROM surumler WHERE passage_id=? AND id NOT IN "
+                  "(SELECT id FROM surumler WHERE passage_id=? ORDER BY id DESC LIMIT ?)", (p["id"], p["id"], SURUM_SINIRI))
+
+
+def pasaj_yaz(p: dict, alan: dict, neden: str) -> dict:
+    """Pasajı günceller; asıl metin değişince harekeleme düşer, çift okuma maddeleri yeniden konumlanır; önceki metin
+    sürüm olarak saklanır."""
+    if "ar" in alan and alan["ar"] != p["ar"]:
+        alan["ar_vocalized"] = None  # asıl metin değişti; eski harekeleme artık onu yansıtmıyor
+        supheli = supheli_gecerli({**p, "ar": alan["ar"]})  # düzeltilen kelimenin çift okuma maddesi düşer
+        alan["supheli"] = json.dumps(supheli, ensure_ascii=False) if supheli else None
+    with closing(db()) as c, c:
+        surum_ekle(c, p, alan, neden)
+        if alan:
+            c.execute(f"UPDATE passages SET {', '.join(k + '=?' for k in alan)} WHERE id=?", (*alan.values(), p["id"]))
+    return zengin(bul("passages", p["id"]))
 
 
 # ---------- kullanım defteri ve bütçe ----------
@@ -447,7 +494,8 @@ def talik_bol(pid: int) -> dict:
                 adet = len(p["ar"][bas:son].split())
                 ps = [{**m, "i": m["i"] - kayma} for m in supheli if kayma <= m.get("i", -1) < kayma + adet]
                 alan = (p["ar"][bas:son].strip(), lemma, json.dumps(ps, ensure_ascii=False) if ps else None)
-                if n == 0:  # ilk parça pasajın kimliğini korur
+                if n == 0:  # ilk parça pasajın kimliğini korur (bölünmeden önceki metni sürüm olarak kalır)
+                    surum_ekle(c, p, {"ar": alan[0]}, "bolme")
                     c.execute("UPDATE passages SET ar=?, lemma=?, supheli=? WHERE id=?", (*alan, p["id"]))
                     sira.append(p["id"])
                 else:
@@ -619,6 +667,8 @@ def zengin(p: dict) -> dict:
     p["kutu"] = json_oku(p["kutu"], None)
     p["supheli"] = supheli_gecerli(p)
     p["kapali"] = json_oku(p["kapali"], [])
+    p["isaretli"] = bool(p["isaretli"])
+    p["surum"] = sor("SELECT COUNT(*) AS n FROM surumler WHERE passage_id=?", p["id"])[0]["n"]
     return p
 
 
@@ -626,7 +676,8 @@ SAYFA_OZETI = """SELECT p.id, p.no, p.book_id,
     (SELECT COUNT(*) FROM passages WHERE page_id=p.id) AS blok,
     (SELECT COUNT(*) FROM passages WHERE page_id=p.id AND tur!='diger') AS pasaj,
     (SELECT COUNT(*) FROM passages WHERE page_id=p.id AND tur!='diger' AND durum='onayli') AS onayli,
-    (SELECT COUNT(*) FROM passages WHERE page_id=p.id AND tur!='diger' AND TRIM(tr)='' AND durum!='onayli') AS cevrilmemis
+    (SELECT COUNT(*) FROM passages WHERE page_id=p.id AND tur!='diger' AND TRIM(tr)='' AND durum!='onayli') AS cevrilmemis,
+    (SELECT COUNT(*) FROM passages WHERE page_id=p.id AND isaretli=1) AS isaretli
     FROM pages p"""
 
 
@@ -688,6 +739,7 @@ def kitaplar():
         (SELECT COUNT(*) FROM passages p JOIN pages pg ON pg.id=p.page_id WHERE pg.book_id=b.id AND p.tur!='diger') AS pasaj,
         (SELECT COUNT(*) FROM passages p JOIN pages pg ON pg.id=p.page_id
             WHERE pg.book_id=b.id AND p.tur!='diger' AND p.durum='onayli') AS onayli,
+        (SELECT COUNT(*) FROM passages p JOIN pages pg ON pg.id=p.page_id WHERE pg.book_id=b.id AND p.isaretli=1) AS isaretli,
         (SELECT COALESCE(SUM(maliyet), 0) FROM usage WHERE book_id=b.id) AS maliyet
         FROM books b ORDER BY b.id DESC""")]
 
@@ -697,8 +749,9 @@ def kitap(bid: int):
     k = bul("books", bid)
     satirlar = {s["no"]: s for s in sor(SAYFA_OZETI + " WHERE p.book_id=?", bid)}
     nolar = range(1, k["sayfa_sayisi"] + 1) if k["dosya"] else sorted(satirlar)
-    k["sayfalar"] = [satirlar.get(n) or {"id": None, "no": n, "blok": 0, "pasaj": 0, "onayli": 0, "cevrilmemis": 0}
-                     for n in nolar]
+    k["sayfalar"] = [satirlar.get(n) or {"id": None, "no": n, "blok": 0, "pasaj": 0, "onayli": 0, "cevrilmemis": 0,
+                                         "isaretli": 0} for n in nolar]
+    k["isaretli"] = sum(s["isaretli"] for s in k["sayfalar"])
     k["ayar"] = ayar_coz(k["ayar"])
     k["kuyruk"] = len(kuyruk(bid))
     return k
@@ -863,46 +916,291 @@ def yalniz_matn(bid: int):
     return sonuc
 
 
+def kisalt(metin: str, boy: int = 120) -> str:
+    metin = " ".join(metin.split())
+    return metin if len(metin) <= boy else metin[:boy].rsplit(" ", 1)[0] + " …"
+
+
+@app.get("/api/books/{bid}/flagged")
+def isaretliler(bid: int):
+    """"Tekrar bak" işaretli pasajlar, sayfa/pasaj sırasıyla; ar/tr kısa alıntıdır."""
+    bul("books", bid)
+    return [{**p, "ar": kisalt(p["ar"]), "tr": kisalt(p["tr"])} for p in sor(
+        """SELECT pg.no, p.id AS passage_id, p.page_id, p.sira, p.tur AS katman, p.notu, p.ar, p.tr FROM passages p
+           JOIN pages pg ON pg.id=p.page_id WHERE pg.book_id=? AND p.isaretli=1 ORDER BY pg.no, p.sira""", bid)]
+
+
+# ---------- arama ----------
+ARAP_HARF = re.compile(r"[؀-ۿݐ-ݿ]")
+IMLA_SINIF = {"ا": "اأإآٱ", "ي": "يى"}  # arapca_test.IMLA'nın tersi: iskeletteki harf metinde bunlardan biri olabilir
+HAREKE_SINIF = r"[ً-ْٰـ]"  # arapca_test.HAREKE ile aynı küme
+
+
+def arapca_desen(hedef: str) -> re.Pattern:
+    """imla(rasm(sorgu)) iskeletini ham metinde arayan desen: harfler arasında hareke/tatvil/boşluk, hemze kürsüsü ve
+    elif-i maksûre farkı serbest; son harfin harekeleri eşleşmeye dahil. imla(rasm(metin)) içinde aramayla aynı sonucu
+    verir, ama metin dönüştürülmez (30 bin pasajda dönüştürme ~1.5 sn sürüyordu) ve konum doğrudan asıl metinde çıkar."""
+    ara = HAREKE_SINIF[:-1] + r"\s]*"
+    return re.compile(ara.join(f"[{re.escape(IMLA_SINIF.get(h, h))}]" for h in hedef) + HAREKE_SINIF + "*")
+
+
+def alinti(metin: str, bas: int, son: int) -> dict:
+    """Eşleşmenin çevresinden kısa alıntı; kenarlar kelime sınırında kesilir."""
+    once, sonra = metin[max(0, bas - ALINTI):bas], metin[son:son + ALINTI]
+    if bas > ALINTI and " " in once:
+        once = "… " + once.split(" ", 1)[1]
+    if son + ALINTI < len(metin) and " " in sonra:
+        sonra = sonra.rsplit(" ", 1)[0] + " …"
+    return {"once": once, "eslesme": metin[bas:son], "sonra": sonra}
+
+
+@app.get("/api/search")
+def ara(q: str = "", kitap: Optional[int] = None):
+    """Bütün arşivde (ya da bir kitapta) arama. Sorguda Arapça harf varsa Arapça metinde harekesiz ve imla farkı
+    gözetmeden (rasm/imla; boşluk da gözetilmez), yoksa çeviride Türkçe büyük/küçük harf kurallarıyla (İ/ı) aranır.
+    Pasaj başına bir sonuç (ilk eşleşme; adet: pasajdaki eşleşme sayısı); bas/son eşleşmenin alandaki konumu."""
+    arapca = bool(ARAP_HARF.search(q))
+    hedef = imla(rasm(q)) if arapca else tr_kucuk(" ".join(q.split()))
+    if len(hedef) < 2:
+        raise HTTPException(422, "Arama için en az 2 karakter gerekli")
+    if kitap is not None:
+        bul("books", kitap)
+    alan = "ar" if arapca else "tr"
+    desen = arapca_desen(hedef) if arapca else None
+    sonuclar = []
+    with closing(db()) as c:
+        satirlar = c.execute(f"""SELECT p.id, p.page_id, p.tur, p.{alan} AS metin, pg.no, pg.book_id, b.ad
+                                 FROM passages p JOIN pages pg ON pg.id=p.page_id JOIN books b ON b.id=pg.book_id
+                                 {'WHERE pg.book_id=?' if kitap is not None else ''}
+                                 ORDER BY pg.book_id, pg.no, p.sira""", (kitap,) if kitap is not None else ())
+        for r in satirlar:
+            metin = r["metin"]
+            if arapca:
+                m = desen.search(metin)
+                if not m:
+                    continue
+                bas, son, adet = m.start(), m.end(), sum(1 for _ in desen.finditer(metin))
+            else:
+                kucuk = tr_kucuk(metin)
+                i = kucuk.find(hedef)
+                if i < 0:
+                    continue
+                bas, son, adet = i, i + len(hedef), kucuk.count(hedef)
+            if len(sonuclar) == AZAMI_SONUC:
+                return {"sonuclar": sonuclar, "alan": alan, "sinir": AZAMI_SONUC, "asildi": True}
+            sonuclar.append({"kitap_id": r["book_id"], "kitap": r["ad"], "no": r["no"], "page_id": r["page_id"],
+                             "passage_id": r["id"], "katman": r["tur"], "alan": alan, "bas": bas, "son": son,
+                             "adet": adet, **alinti(metin, bas, son)})
+    return {"sonuclar": sonuclar, "alan": alan, "sinir": AZAMI_SONUC, "asildi": False}
+
+
+# ---------- yedek ----------
+@app.get("/api/backup/status")
+def yedek_durumu():
+    """Son gecelik yedeğin tarihi (yedek.py; yoksa None)."""
+    return {"son": yedek_modul.son_yedek(VERI)}
+
+
+@app.get("/api/backup")
+def yedek_indir():
+    """Veritabanının o anki tutarlı kopyası (SQLite çevrimiçi yedekleme API'si, bütünlük denetimli)."""
+    db().close()  # şema/dizin hazır olsun
+    (VERI / "yedek").mkdir(exist_ok=True)
+    fd, ad = tempfile.mkstemp(prefix=".indir-", suffix=".db", dir=VERI / "yedek")
+    os.close(fd)
+    gecici = Path(ad)
+    try:
+        yedek_modul.kopyala(VERI / "kitap.db", gecici)
+    except yedek_modul.YedekHatasi as e:
+        gecici.unlink(missing_ok=True)
+        raise HTTPException(500, f"Yedek alınamadı: {e}")
+    return FileResponse(gecici, media_type="application/vnd.sqlite3", filename=f"kitap-{datetime.now():%Y-%m-%d-%H%M}.db",
+                        background=BackgroundTask(gecici.unlink, missing_ok=True))
+
+
+# ---------- DOCX çıktısı ----------
 BICIM = re.compile(r"(\*\*.+?\*\*|\*(?=\S)[^*\n]+?(?<=\S)\*)", re.S)  # **kalın** ya da *italik* parça
+DIPNOT_ISKELET = """<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+<w:r><w:separator/></w:r></w:p></w:footnote>
+<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+</w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote></w:footnotes>"""
 
 
-@app.get("/api/books/{bid}/export.docx")
-def docx_cikti(bid: int, sadece_onayli: bool = False):
-    from docx import Document
+def tr_yaz(par, metin: str, boy=None):
+    """Çeviriyi biçimiyle yazar: **matn** -> kalın, *âyet meali* -> italik; boşsa [çevrilmemiş]."""
+    from docx.shared import Pt
+
+    if not metin.strip():
+        kosu = par.add_run("[çevrilmemiş]")
+        kosu.italic = True
+        if boy:
+            kosu.font.size = Pt(boy)
+        return
+    for i, parca in enumerate(BICIM.split(metin)):
+        kalin, italik = i % 2 and parca.startswith("**"), i % 2 and not parca.startswith("**")
+        if parca:
+            kosu = par.add_run(parca[2:-2] if kalin else parca[1:-1] if italik else parca)
+            kosu.bold, kosu.italic = bool(kalin), bool(italik)
+            if boy:
+                kosu.font.size = Pt(boy)
+
+
+def ar_yaz(par, metin: str, boy: int = 14, kalin: bool = False):
+    """Sağdan sola Arapça koşu."""
     from docx.oxml import OxmlElement
     from docx.shared import Pt
 
+    kosu = par.add_run(metin)
+    kosu._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
+    kosu.font.size = Pt(boy)
+    if kalin:
+        kosu.bold = True
+
+
+class Dipnotlar:
+    """Gerçek Word dipnotu: word/footnotes.xml parçası (ayırıcı dipnotlar -1/0 ile), belgeden ilişki, settings'te
+    footnotePr ve metinde w:footnoteReference. İlk dipnotta kurulur; kimlikler 1'den sırayla verilir."""
+
+    def __init__(self, belge):
+        self.belge, self.kok, self.no = belge, None, 0
+
+    def ekle(self, par, lemma: Optional[str], tr: str, ayir: bool = False):
+        """par'ın sonuna dipnot işareti koyar (ayir: önceki işaretten üst simge virgülle ayır, "12" okunmasın)."""
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        from docx.opc.packuri import PackURI
+        from docx.opc.part import XmlPart
+        from docx.oxml import OxmlElement, parse_xml
+        from docx.oxml.ns import qn
+        from docx.shared import Pt
+
+        if self.kok is None:
+            parca = XmlPart(PackURI("/word/footnotes.xml"),
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+                            parse_xml(DIPNOT_ISKELET), self.belge.part.package)
+            self.belge.part.relate_to(parca, RT.FOOTNOTES)
+            self.kok = parca.element
+            ayar = parse_xml('<w:footnotePr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                             '<w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>')
+            self.belge.settings.element.find(qn("w:compat")).addprevious(ayar)  # şemada footnotePr compat'tan önce
+        self.no += 1
+        if ayir:
+            par.add_run(",").font.superscript = True
+        imlec = par.add_run()  # metindeki işaret
+        imlec.font.superscript = True
+        ref = OxmlElement("w:footnoteReference")
+        ref.set(qn("w:id"), str(self.no))
+        imlec._r.append(ref)
+        dp = self.belge.add_paragraph()  # biçim yardımcılarını kullanmak için gövdede kurulur, sonra taşınır
+        dp._p.getparent().remove(dp._p)
+        dp.paragraph_format.space_after = Pt(0)
+        isaret = dp.add_run()
+        isaret.font.superscript = True
+        isaret._r.append(OxmlElement("w:footnoteRef"))
+        dp.add_run(" ")
+        if lemma:
+            ar_yaz(dp, lemma, 12, kalin=True)
+            dp.add_run(" ")
+        tr_yaz(dp, tr, 10)
+        dipnot = OxmlElement("w:footnote")
+        dipnot.set(qn("w:id"), str(self.no))
+        dipnot.append(dp._p)
+        self.kok.append(dipnot)
+
+
+@app.get("/api/books/{bid}/export.docx")
+def docx_cikti(bid: int, duzen: Literal["karsilikli", "turkce", "dipnotlu"] = "karsilikli", harekeli: bool = True,
+               katman: list[Literal["serh", "hasiye"]] = Query(["serh", "hasiye"]),
+               bas: Optional[int] = Query(None, ge=1), son: Optional[int] = Query(None, ge=1),
+               sadece_onayli: bool = False):
+    """karsilikli: Türkçe | Arapça iki sütunlu tablo (harekeli: rasm kontrolünden geçen harekeli metin). turkce: yalnız
+    çeviri, sayfa başlıklarıyla. dipnotlu: şerh çevirisi ana metin, ona bağlı talikler (bagli_id) lemma + çeviriyle
+    Word dipnotu (işaret paragraf sonunda sırayla); bağsız hâşiye sayfa bölümünün sonunda "Hâşiye" başlığı altında.
+    katman / bas-son (sayfa no) / sadece_onayli süzgeçtir; seçime uyan pasaj yoksa 422."""
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.shared import Cm
+
     k = bul("books", bid)
+    katman = sorted(set(katman))
+    if bas and son and bas > son:
+        raise HTTPException(422, f"Sayfa aralığı ters: başlangıç ({bas}) bitişten ({son}) büyük")
+    if duzen == "dipnotlu" and "serh" not in katman:
+        raise HTTPException(422, "Dipnotlu düzende ana metin şerh çevirisidir; şerh katmanını da seç")
+    sart, arg = [f"p.tur IN ({','.join('?' * len(katman))})"], list(katman)
+    for kosul, deger in (("pg.no>=?", bas), ("pg.no<=?", son)):
+        if deger:
+            sart.append(kosul)
+            arg.append(deger)
+    if sadece_onayli:
+        sart.append("p.durum='onayli'")
     pasajlar = sor(f"""SELECT pg.no, p.* FROM passages p JOIN pages pg ON pg.id=p.page_id
-                       WHERE pg.book_id=? AND p.tur!='diger' {"AND p.durum='onayli'" if sadece_onayli else ""}
-                       ORDER BY pg.no, p.sira""", bid)
+                       WHERE pg.book_id=? AND {' AND '.join(sart)} ORDER BY pg.no, p.sira""", bid, *arg)
     if not pasajlar:
-        raise HTTPException(422, "Dışa aktarılacak pasaj yok")
+        raise HTTPException(422, "Seçime uyan pasaj yok (katman, sayfa aralığı ya da yalnız onaylı süzgecini gevşet)")
     belge = Document()
-    tablo = belge.add_table(rows=0, cols=2)
-    tablo.style = "Table Grid"
-    for p in pasajlar:
-        sol, sag = tablo.add_row().cells
-        par = sol.paragraphs[0]
-        par.add_run(f"[s. {p['no']} · {p['tur']}] ").italic = True
-        for i, parca in enumerate(BICIM.split(p["tr"])):  # **matn** -> kalın, *âyet meali* -> italik
-            kalin, italik = i % 2 and parca.startswith("**"), i % 2 and not parca.startswith("**")
-            if parca:
-                kosu = par.add_run(parca[2:-2] if kalin else parca[1:-1] if italik else parca)
-                kosu.bold, kosu.italic = bool(kalin), bool(italik)
-        # rasm kontrolünden geçmeyen harekeleme çıktıya girmez
-        temiz = p["ar_vocalized"] and rasm_kontrol(p["ar"], p["ar_vocalized"])["imla"]
-        par = sag.paragraphs[0]
-        par._p.get_or_add_pPr().append(OxmlElement("w:bidi"))
-        kosu = par.add_run(p["ar_vocalized"] if temiz else p["ar"])
-        kosu._r.get_or_add_rPr().append(OxmlElement("w:rtl"))
-        kosu.font.size = Pt(14)
+    if duzen == "karsilikli":
+        tablo = belge.add_table(rows=0, cols=2)
+        tablo.style = "Table Grid"
+        for p in pasajlar:
+            sol, sag = tablo.add_row().cells
+            par = sol.paragraphs[0]
+            par.add_run(f"[s. {p['no']} · {p['tur']}] ").italic = True
+            if p["tr"]:  # boş çeviri: boş hücre (eskisi gibi)
+                tr_yaz(par, p["tr"])
+            # rasm kontrolünden geçmeyen harekeleme çıktıya girmez
+            temiz = harekeli and p["ar_vocalized"] and rasm_kontrol(p["ar"], p["ar_vocalized"])["imla"]
+            par = sag.paragraphs[0]
+            par._p.get_or_add_pPr().append(OxmlElement("w:bidi"))
+            ar_yaz(par, p["ar_vocalized"] if temiz else p["ar"])
+    else:
+        idler = {p["id"]: p for p in pasajlar}
+        talikler = {}  # şerh pasajı -> ona bağlı (seçimdeki) talikler, sayfa/pasaj sırasıyla
+        if duzen == "dipnotlu":
+            for p in pasajlar:
+                if p["tur"] == "hasiye" and idler.get(p["bagli_id"], {}).get("tur") == "serh":
+                    talikler.setdefault(p["bagli_id"], []).append(p)
+        dipnotta = {t["id"] for ts in talikler.values() for t in ts}
+        dipnotlar = Dipnotlar(belge)
+
+        def hasiye_yaz(p):
+            par = belge.add_paragraph()
+            par.paragraph_format.left_indent = Cm(1)
+            if duzen == "turkce":
+                par.add_run("Hâşiye: ").italic = True
+            if p["lemma"]:
+                ar_yaz(par, p["lemma"], 13, kalin=True)
+                par.add_run(" ")
+            tr_yaz(par, p["tr"])
+
+        for no, grup in groupby(pasajlar, key=lambda p: p["no"]):
+            belge.add_heading(f"s. {no}", level=2)
+            grup = list(grup)
+            if duzen == "turkce":
+                for p in grup:
+                    if p["tur"] == "serh":
+                        tr_yaz(belge.add_paragraph(), p["tr"])
+                    else:
+                        hasiye_yaz(p)
+                continue
+            for p in grup:
+                if p["tur"] == "serh":
+                    par = belge.add_paragraph()
+                    tr_yaz(par, p["tr"])
+                    for n, t in enumerate(talikler.get(p["id"], [])):
+                        dipnotlar.ekle(par, t["lemma"], t["tr"], ayir=n > 0)
+            bagsiz = [p for p in grup if p["tur"] == "hasiye" and p["id"] not in dipnotta]
+            if bagsiz:
+                belge.add_heading("Hâşiye", level=3)
+                for p in bagsiz:
+                    hasiye_yaz(p)
     tampon = io.BytesIO()
     belge.save(tampon)
+    ek = {"karsilikli": "", "turkce": "-turkce", "dipnotlu": "-dipnotlu"}[duzen]
     return Response(tampon.getvalue(),
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    headers={"Content-Disposition": f"attachment; filename=\"kitap-{bid}.docx\"; "
-                                                    f"filename*=UTF-8''{quote(k['ad'])}.docx"})
+                    headers={"Content-Disposition": f"attachment; filename=\"kitap-{bid}{ek}.docx\"; "
+                                                    f"filename*=UTF-8''{quote(k['ad'] + ek)}.docx"})
 
 
 # ---------- sayfalar ----------
@@ -983,9 +1281,11 @@ def ocr_yap(pid: int) -> list:
 @app.post("/api/pages/{pid}/ocr")
 def ocr(pid: int, zorla: bool = False):
     bul("pages", pid)
-    emek = sor("SELECT COUNT(*) AS n FROM passages WHERE page_id=? AND (tr!='' OR durum='onayli')", pid)[0]["n"]
+    emek = sor("SELECT COUNT(*) AS n FROM passages WHERE page_id=? AND (tr!='' OR durum='onayli' OR notu!='' "
+               "OR isaretli=1)", pid)[0]["n"]
     if emek and not zorla:
-        raise HTTPException(409, f"Bu sayfada {emek} çevrilmiş/onaylı pasaj var; yeniden OCR bunları siler.")
+        raise HTTPException(409, f"Bu sayfada {emek} çevrilmiş/onaylı ya da notlu pasaj var; yeniden OCR bunları "
+                                 "sürüm geçmişleri ve notlarıyla birlikte siler.")
     with tek_is():
         uyarilar = ocr_yap(pid)
     return {**sayfa(pid), "uyarilar": uyarilar}
@@ -1022,21 +1322,42 @@ class PasajGuncelle(BaseModel):
     tr: Optional[str] = None
     tur: Optional[Literal["serh", "hasiye", "diger"]] = None
     durum: Optional[Literal["taslak", "onayli"]] = None
+    notu: Optional[str] = Field(None, max_length=AZAMI_NOT)  # boş metin notu kaldırır
+    isaretli: Optional[StrictBool] = None  # "tekrar bak"
+    neden: Literal["elle", "oneri"] = "elle"  # metin değişirse sürüm kaydının nedeni (öneri kabulü ayrı görünür)
 
 
 @app.patch("/api/passages/{kid}")
 def pasaj_guncelle(kid: int, g: PasajGuncelle):
     p = bul("passages", kid)
-    alan = g.model_dump(exclude_none=True)
+    alan = g.model_dump(exclude_none=True, exclude={"neden"})
     if g.durum == "onayli" and not alan.get("tr", p["tr"]).strip():
         raise HTTPException(422, "Çevirisi boş pasaj onaylanamaz")
-    if "ar" in alan and alan["ar"] != p["ar"]:
-        alan["ar_vocalized"] = None  # asıl metin değişti; eski harekeleme artık onu yansıtmıyor
-        supheli = supheli_gecerli({**p, "ar": alan["ar"]})  # düzeltilen kelimenin çift okuma maddesi düşer
-        alan["supheli"] = json.dumps(supheli, ensure_ascii=False) if supheli else None
-    if alan:
-        yaz(f"UPDATE passages SET {', '.join(k + '=?' for k in alan)} WHERE id=?", *alan.values(), kid)
-    return zengin(bul("passages", kid))
+    if "notu" in alan:
+        alan["notu"] = alan["notu"].strip()
+    if "isaretli" in alan:
+        alan["isaretli"] = int(alan["isaretli"])
+    return pasaj_yaz(p, alan, g.neden)
+
+
+@app.get("/api/passages/{kid}/versions")
+def surumler(kid: int):
+    """Pasajın sürümleri, en yenisi önce: [{id, alan, metin, neden, zaman}] (metin: değişiklikten ÖNCEKİ hâl)."""
+    bul("passages", kid)
+    return sor("SELECT id, alan, metin, neden, zaman FROM surumler WHERE passage_id=? ORDER BY id DESC", kid)
+
+
+@app.post("/api/passages/{kid}/versions/{vid}/restore")
+def surume_don(kid: int, vid: int):
+    """Sürümdeki metni geri yükler; şimdiki metin de "geri" nedeniyle sürüm olur (geri alma da geri alınabilir).
+    Onaylı pasajda engellenir: yeniden çeviri gibi, önce onay kaldırılmalı."""
+    p = bul("passages", kid)
+    s = sor("SELECT * FROM surumler WHERE id=? AND passage_id=?", vid, kid)
+    if not s:
+        raise HTTPException(404, f"Bu pasajda #{vid} sürümü yok")
+    if p["durum"] == "onayli":
+        raise HTTPException(409, "Onaylı pasajda sürüme dönülmez; önce onayı kaldır")
+    return pasaj_yaz(p, {s[0]["alan"]: s[0]["metin"]}, "geri")
 
 
 def ceviri_yap(p: dict):
@@ -1047,7 +1368,7 @@ def ceviri_yap(p: dict):
     ek = (sozluk_metni(p["ar"]) + yonerge_metni(k) + (bellek_metni(p, k["id"]) if ayar["ceviri_bellegi"] else "")
           + (AYET_PROMPT if ayar["ayet_isaret"] else "") + komsu_baglam(p))
     tr = ai_parcali("ceviri", lambda m: ek + CEVIRI_PROMPT.format(metin=m), p["ar"], p["page_id"])
-    yaz("UPDATE passages SET tr=? WHERE id=?", tr, p["id"])
+    pasaj_yaz(bul("passages", p["id"]), {"tr": tr}, "ceviri")  # çeviri sürerken yapılan düzenleme de sürüm olur
 
 
 @app.post("/api/passages/{kid}/translate")

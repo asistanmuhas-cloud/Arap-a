@@ -545,6 +545,15 @@ assert c.get("/api/books/5").json()["ayar"]["cift_okuma"]  # yeniden açılışt
 with closing(sqlite3.connect(onceki / "kitap.db")) as e:
     assert "yonerge" in {r[1] for r in e.execute("PRAGMA table_info(books)")}
     assert e.execute("SELECT yonerge FROM books WHERE id=5").fetchone()[0] == ""
+    # sürüm tablosu ve not/işaret sütunları eklendi; eski satırlar varsayılanla doldu
+    assert {"notu", "isaretli"} <= {r[1] for r in e.execute("PRAGMA table_info(passages)")}
+    assert e.execute("SELECT COUNT(*), SUM(isaretli), MAX(notu) FROM passages").fetchone() == (2, 0, "")
+    assert e.execute("SELECT COUNT(*) FROM surumler").fetchone()[0] == 0
+p0 = c.get("/api/pages/1").json()["pasajlar"][0]
+assert p0["tr"] == "Dedi" and p0["notu"] == "" and p0["isaretli"] is False and p0["surum"] == 0
+p0 = c.patch(f"/api/passages/{p0['id']}", json={"tr": "Dedi ki", "isaretli": True, "notu": "göç"}).json()
+assert p0["surum"] == 1 and c.get(f"/api/passages/{p0['id']}/versions").json()[0]["metin"] == "Dedi"
+assert c.get("/api/books").json()[0]["isaretli"] == 1
 
 # ======== çeviri kalitesi (temiz veri dizininde) ========
 kalite = Path(tempfile.mkdtemp())
@@ -763,6 +772,361 @@ assert c.get(f"/api/books/{bos}/matn").json() == []
 
 shutil.rmtree(kalite)
 
+# ======== sürüm geçmişi, arama, not/işaret, yedek, çıktı seçenekleri (temiz veri dizininde) ========
+from datetime import date  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+import yedek  # noqa: E402
+
+son_tur = Path(tempfile.mkdtemp())
+uyg.VERI = son_tur
+kA = c.post("/api/upload", files=[("dosyalar", (f"a{i}.jpg", jpg())) for i in (1, 2, 3)]).json()["kitaplar"][0]["id"]
+kB = c.post("/api/upload", files=[("dosyalar", ("b1.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+sA = [s["id"] for s in c.get(f"/api/books/{kA}").json()["sayfalar"]]
+sB = c.get(f"/api/books/{kB}").json()["sayfalar"][0]["id"]
+surum = lambda kid: c.get(f"/api/passages/{kid}/versions").json()  # noqa: E731
+
+# ---- sürüm geçmişi: her neden; değişmeyen kayıt ve boş önceki metin sürüm üretmez ----
+v1 = pasaj(sA[0], "serh", "قال الشيخ", "Dedi")
+assert c.get(f"/api/passages/{v1}/versions").json() == [] and c.get("/api/passages/999/versions").status_code == 404
+c.patch(f"/api/passages/{v1}", json={"tr": "Dedi", "ar": "قال الشيخ", "durum": "taslak", "tur": "serh"})  # aynısı
+c.patch(f"/api/passages/{v1}", json={"notu": "not", "isaretli": True})  # not/işaret sürüm üretmez
+assert surum(v1) == []
+c.patch(f"/api/passages/{v1}", json={"tr": "Dedi ki"})
+c.patch(f"/api/passages/{v1}", json={"tr": "Şeyh dedi", "neden": "oneri"})
+assert c.patch(f"/api/passages/{v1}", json={"tr": "x", "neden": "geri"}).status_code == 422  # nedeni istemci seçemez
+uyg.yaz("UPDATE passages SET ar_vocalized='قَالَ الشَّيْخُ' WHERE id=?", v1)
+p = c.patch(f"/api/passages/{v1}", json={"ar": "قال الشيخ رحمه الله"}).json()
+assert p["ar_vocalized"] is None and p["surum"] == 3  # asıl metin değişince harekeleme yine düşer
+CEVIRI.append("Şeyh -rahimehullah- dedi")
+assert c.post(f"/api/passages/{v1}/translate").json()["tr"] == "Şeyh -rahimehullah- dedi"
+s = surum(v1)
+assert [(x["alan"], x["metin"], x["neden"]) for x in s] == [
+    ("tr", "Şeyh dedi", "ceviri"), ("ar", "قال الشيخ", "elle"), ("tr", "Dedi ki", "oneri"), ("tr", "Dedi", "elle")]
+assert all(x["zaman"] for x in s) and [x["id"] for x in s] == sorted((x["id"] for x in s), reverse=True)
+bos_tr = pasaj(sA[0], "serh", "قال", "")  # ilk çeviri: önceki metin boş, sürüm yok
+c.post(f"/api/passages/{bos_tr}/translate")
+assert surum(bos_tr) == [] and uyg.bul("passages", bos_tr)["tr"]
+# taliklere bölme: ilk parçanın bölünmeden önceki metni "bolme" sürümü olur
+bol = pasaj(sA[1], "hasiye", "العلماء الخ قوله فرادى ) أقول فيه نظر")
+r = c.post(f"/api/pages/{sA[1]}/split").json()
+assert uyg.bul("passages", bol)["ar"] == "العلماء الخ" and r["rapor"]["bolunen"] == 1
+assert [(x["alan"], x["metin"], x["neden"]) for x in surum(bol)] == [("ar", "العلماء الخ قوله فرادى ) أقول فيه نظر", "bolme")]
+# geri yükleme: şimdiki metin "geri" sürümü olur; geri alma da geri alınabilir
+ilk = s[-1]  # tr "Dedi"
+p = c.post(f"/api/passages/{v1}/versions/{ilk['id']}/restore").json()
+assert p["tr"] == "Dedi" and p["surum"] == 5
+geri = surum(v1)[0]
+assert (geri["alan"], geri["metin"], geri["neden"]) == ("tr", "Şeyh -rahimehullah- dedi", "geri")
+assert c.post(f"/api/passages/{v1}/versions/{geri['id']}/restore").json()["tr"] == "Şeyh -rahimehullah- dedi"
+assert surum(v1)[0]["metin"] == "Dedi" and len(surum(v1)) == 6
+ar_s = [x for x in surum(v1) if x["alan"] == "ar"][0]
+uyg.yaz("UPDATE passages SET ar_vocalized='x' WHERE id=?", v1)
+p = c.post(f"/api/passages/{v1}/versions/{ar_s['id']}/restore").json()
+assert p["ar"] == "قال الشيخ" and p["ar_vocalized"] is None and surum(v1)[0]["metin"] == "قال الشيخ رحمه الله"
+n = len(surum(v1))
+assert c.post(f"/api/passages/{v1}/versions/{ar_s['id']}/restore").json()["surum"] == n  # zaten o metin: sürüm yok
+assert c.post(f"/api/passages/{v1}/versions/{s[0]['id'] + 999}/restore").status_code == 404
+assert c.post(f"/api/passages/{bos_tr}/versions/{ar_s['id']}/restore").status_code == 404  # başka pasajın sürümü
+c.patch(f"/api/passages/{v1}", json={"durum": "onayli"})
+y = c.post(f"/api/passages/{v1}/versions/{ilk['id']}/restore")
+assert y.status_code == 409 and "onayı kaldır" in y.json()["detail"] and len(surum(v1)) == n  # onaylıda engellenir
+c.patch(f"/api/passages/{v1}", json={"durum": "taslak"})
+# öneri kabulü UI'da PATCH {tr, neden: "oneri"}; elle düzenleme onaylıda serbest (eskisi gibi) ve sürüm üretir
+# 50 sınırı: en eskiler silinir
+cok = pasaj(sA[0], "serh", "قال", "sürüm 0")
+for i in range(1, 61):
+    c.patch(f"/api/passages/{cok}", json={"tr": f"sürüm {i}"})
+s = surum(cok)
+assert len(s) == uyg.SURUM_SINIRI == 50 and s[0]["metin"] == "sürüm 59" and s[-1]["metin"] == "sürüm 10"
+# pasaj silinince (sayfa silme) sürümleri de silinir
+sil_s = c.post("/api/upload", files=[("dosyalar", ("sil.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+sil_p = c.get(f"/api/books/{sil_s}").json()["sayfalar"][0]["id"]
+sil_k = pasaj(sil_p, "serh", "قال", "a")
+c.patch(f"/api/passages/{sil_k}", json={"tr": "b"})
+assert uyg.sor("SELECT COUNT(*) AS n FROM surumler WHERE passage_id=?", sil_k)[0]["n"] == 1
+c.delete(f"/api/books/{sil_s}")
+assert uyg.sor("SELECT COUNT(*) AS n FROM surumler WHERE passage_id=?", sil_k)[0]["n"] == 0
+
+# ---- not ve "tekrar bak" işareti ----
+assert c.patch(f"/api/passages/{v1}", json={"notu": "x" * 1001}).status_code == 422
+assert c.patch(f"/api/passages/{v1}", json={"isaretli": "evet"}).status_code == 422
+p = c.patch(f"/api/passages/{v1}", json={"notu": "  lemmaya tekrar bak  ", "isaretli": True}).json()
+assert p["notu"] == "lemmaya tekrar bak" and p["isaretli"] is True
+assert c.patch(f"/api/passages/{v1}", json={"notu": "x" * 1000}).status_code == 200
+c.patch(f"/api/passages/{v1}", json={"notu": "lemmaya tekrar bak"})
+v2 = pasaj(sA[2], "hasiye", "قوله كذا ) اي " + "كلام " * 40, "Uzun hâşiye çevirisi " * 10)
+c.patch(f"/api/passages/{v2}", json={"isaretli": True})
+c.patch(f"/api/passages/{v1}", json={"isaretli": True})  # ikinci kez: hâlâ bir
+k = c.get(f"/api/books/{kA}").json()
+assert [s["isaretli"] for s in k["sayfalar"]] == [1, 0, 1] and k["isaretli"] == 2
+assert {b["id"]: b["isaretli"] for b in c.get("/api/books").json()} == {kA: 2, kB: 0}
+f = c.get(f"/api/books/{kA}/flagged").json()
+assert [(x["no"], x["passage_id"], x["page_id"], x["katman"], x["notu"]) for x in f] == [
+    (1, v1, sA[0], "serh", "lemmaya tekrar bak"), (3, v2, sA[2], "hasiye", "")]
+assert f[0]["tr"] == uyg.bul("passages", v1)["tr"] and f[1]["ar"].endswith(" …") and len(f[1]["tr"]) <= 122
+assert c.get("/api/books/999/flagged").status_code == 404 and c.get(f"/api/books/{kB}/flagged").json() == []
+c.patch(f"/api/passages/{v2}", json={"isaretli": False})
+assert c.get(f"/api/books/{kA}").json()["isaretli"] == 1
+# not/işaret de emektir: yeniden OCR onaysız silmez, uyarı geçmişi anar
+notlu_s = c.post("/api/upload", files=[("dosyalar", ("n.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+notlu_p = c.get(f"/api/books/{notlu_s}").json()["sayfalar"][0]["id"]
+c.patch(f"/api/passages/{pasaj(notlu_p, 'serh', 'قال')}", json={"notu": "bak"})
+y = c.post(f"/api/pages/{notlu_p}/ocr")
+assert y.status_code == 409 and "sürüm geçmişleri" in y.json()["detail"]
+c.delete(f"/api/books/{notlu_s}")
+
+# ---- arama: Arapça harekesiz/imla farkı gözetmeden, Türkçe İ/ı kurallarıyla ----
+HAREKELI = "قَالَ الشَّيْخُ إِنَّ الوُضُوءَ فَرْضٌ عَلَى المُكَلَّفِ"
+a1 = pasaj(sA[1], "serh", HAREKELI, "İbadetlerin ILK şartı ıslaklık değildir")
+a2 = pasaj(sB, "hasiye", "قوله ان الوضوء ) فرض", "Abdest farzdır; Iğdır'da da")
+q = c.get("/api/search", params={"q": "ان الوضوء"}).json()  # harekesiz, hemzesiz
+assert [(x["passage_id"], x["kitap_id"], x["katman"], x["alan"]) for x in q["sonuclar"]] == [
+    (a1, kA, "serh", "ar"), (a2, kB, "hasiye", "ar")] and not q["asildi"] and q["sinir"] == 100
+x = q["sonuclar"][0]
+assert HAREKELI[x["bas"]:x["son"]] == "إِنَّ الوُضُوءَ" == x["eslesme"]  # son harfin harekesi dahil
+assert x["once"] + x["eslesme"] + x["sonra"] == HAREKELI and x["no"] == 2 and x["kitap"] == "a1 (+2 görüntü)"
+assert x["page_id"] == sA[1] and x["adet"] == 1
+for sorgu in ("إنّ الوُضوء", "انَّ  الوضوء", "إن الوضوء"):  # harekeli, fazla boşluk, hemzeli
+    assert [r["passage_id"] for r in c.get("/api/search", params={"q": sorgu}).json()["sonuclar"]] == [a1, a2], sorgu
+assert c.get("/api/search", params={"q": "ان الوضوء", "kitap": kB}).json()["sonuclar"][0]["passage_id"] == a2
+assert len(c.get("/api/search", params={"q": "ان الوضوء", "kitap": kB}).json()["sonuclar"]) == 1
+assert c.get("/api/search", params={"q": "الوضوء", "kitap": 999}).status_code == 404
+for kisa in ("a", " ا ", "َّ", "", "  "):
+    y = c.get("/api/search", params={"q": kisa})
+    assert y.status_code == 422 and "en az 2" in y.json()["detail"], kisa
+tr_ara = lambda sorgu, **k: [(r["passage_id"], r["eslesme"]) for r in  # noqa: E731
+                             c.get("/api/search", params={"q": sorgu, **k}).json()["sonuclar"]]
+assert tr_ara("ibadet") == [(a1, "İbadet")] and tr_ara("İBADET") == [(a1, "İbadet")]
+assert tr_ara("ılk") == [(a1, "ILK")] and tr_ara("ilk") == []  # Türkçede I'nın küçüğü ı
+assert tr_ara("ISLAK") == [(a1, "ıslak")] and tr_ara("ığdır") == [(a2, "Iğdır")]
+assert tr_ara("farz") == [(a2, "farz")]  # Türkçe sorgu Arapça metinde aranmaz
+y = c.get("/api/search", params={"q": "değil"}).json()["sonuclar"][0]
+assert uyg.bul("passages", y["passage_id"])["tr"][y["bas"]:y["son"]] == "değil" and y["alan"] == "tr"
+# uzun metinde alıntı: kelime sınırında kesilir, eşleşme ortada
+uzun = pasaj(sA[2], "serh", "قال", "baş " * 30 + "aranan kelime " + "son " * 30)
+y = [r for r in c.get("/api/search", params={"q": "aranan"}).json()["sonuclar"] if r["passage_id"] == uzun][0]
+assert y["once"].startswith("… baş") and y["sonra"].endswith("son …") and len(y["once"]) <= uyg.ALINTI + 2
+assert y["eslesme"] == "aranan" and y["once"].endswith("baş ") and y["sonra"].startswith(" kelime")
+# sonuç sınırı: pasaj başına bir sonuç, en fazla 100; aşılınca söylenir
+with closing(uyg.db()) as e, e:
+    e.executemany("INSERT INTO passages(page_id, sira, tur, ar, tr) VALUES(?, 50, 'serh', ?, ?)",
+                  [(sB, "قال", "tekrar tekrar örnek") for _ in range(105)])
+y = c.get("/api/search", params={"q": "TEKRAR"}).json()
+assert len(y["sonuclar"]) == 100 and y["asildi"] and y["sonuclar"][0]["adet"] == 2
+with closing(uyg.db()) as e, e:
+    e.execute("DELETE FROM passages WHERE sira=50")
+assert not c.get("/api/search", params={"q": "tekrar"}).json()["asildi"]
+# desen araması iskelet (imla(rasm)) içinde aramayla aynı sonucu verir
+for metin in [HAREKELI, "فَإِنْ قِيلَ آيَةُ الوُضُوءِ مَدَنِيَّةٌ", "على الشئ ومُوسَى إلى", "ـالحمـدُ لله"]:
+    for i in range(len(metin)):
+        for j in range(i + 1, min(len(metin), i + 12) + 1):
+            hedef = uyg.imla(uyg.rasm(metin[i:j]))
+            if len(hedef) >= 2:
+                m = uyg.arapca_desen(hedef).search(metin)
+                assert m and uyg.imla(uyg.rasm(m.group())) == hedef, (metin[i:j], m)
+    assert uyg.arapca_desen(uyg.imla(uyg.rasm("الي موسي"))).search("على الشئ ومُوسَى إلى") is None  # sıra farklı
+assert uyg.arapca_desen("اليموسي").search("قال إِلَى مُوسَى") and uyg.arapca_desen("الوضو(").search("الوضوء(") is None
+# hız: 30 bin pasajda
+rnd = random.Random(2)
+with closing(uyg.db()) as e, e:
+    e.executemany("INSERT INTO passages(page_id, sira, tur, ar, tr) VALUES(?, 60, 'serh', ?, ?)",
+                  [(sB, " ".join(rnd.choices(sozcukler, k=80)), " ".join(rnd.choices(["abdest", "namaz", "farz",
+                                                                                      "şart", "İmam", "ılık"], k=60)))
+                   for _ in range(30000)])
+for sorgu, alan in (("ان الوضوء", "ar"), ("aranan kelime", "tr"), ("لا يوجد اصلا", "ar")):
+    bas = time.perf_counter()
+    y = c.get("/api/search", params={"q": sorgu}).json()
+    sure = time.perf_counter() - bas
+    assert y["alan"] == alan and sure < 3, (sorgu, sure)
+    print(f"arama: 30 bin pasajda {alan} sorgusu ({len(y['sonuclar'])} sonuç) {sure * 1000:.0f} ms")
+with closing(uyg.db()) as e, e:
+    e.execute("DELETE FROM passages WHERE sira=60")
+
+# ---- yedek.py: tutarlı kopya, aynı gün üzerine yazma, 14 gün temizliği, bozuk kaynakta hata kodu ----
+
+
+def sayim(yol):
+    with closing(sqlite3.connect(yol)) as e:
+        return [e.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("books", "pages", "passages", "surumler")]
+
+
+gun = date(2026, 11, 13)
+(son_tur / "yedek").mkdir()
+for ad in ("kitap-2026-10-29.db", "kitap-2026-10-30.db", "kitap-2026-11-12.db", "kitap-1999-01-01.txt", "baska.db"):
+    (son_tur / "yedek" / ad).write_bytes(b"eski")
+assert yedek.son_yedek(son_tur) == "2026-11-12" and c.get("/api/backup/status").json() == {"son": "2026-11-12"}
+hedef = yedek.gece(son_tur, gun)
+assert hedef == son_tur / "yedek" / "kitap-2026-11-13.db" and sayim(hedef) == sayim(son_tur / "kitap.db")
+assert sayim(hedef)[3] > 50  # sürümler de yedekte
+assert sorted(f.name for f in (son_tur / "yedek").iterdir()) == [  # 2026-10-29 (15 gün) silindi, 14 gün kaldı
+    "baska.db", "kitap-1999-01-01.txt", "kitap-2026-10-30.db", "kitap-2026-11-12.db", "kitap-2026-11-13.db"]
+pasaj(sB, "serh", "قال", "yeni")
+assert yedek.gece(son_tur, gun) == hedef and sayim(hedef)[2] == sayim(son_tur / "kitap.db")[2]  # aynı gün üzerine
+assert c.get("/api/backup/status").json() == {"son": "2026-11-13"}
+y = c.get("/api/backup")
+assert y.status_code == 200 and y.content.startswith(b"SQLite format 3\x00")
+assert "kitap-" in y.headers["content-disposition"] and ".db" in y.headers["content-disposition"]
+indirilen = son_tur / "indirilen.db"
+indirilen.write_bytes(y.content)
+assert sayim(indirilen) == sayim(son_tur / "kitap.db")
+assert not list((son_tur / "yedek").glob(".indir-*")) and not list((son_tur / "yedek").glob("*.tmp"))
+bozuk = Path(tempfile.mkdtemp())
+with closing(sqlite3.connect(bozuk / "kitap.db")) as e, e:
+    e.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT)")
+    e.execute("CREATE INDEX t_x ON t(x)")
+    e.executemany("INSERT INTO t(x) VALUES(?)", [(f"satır {i} " * 5,) for i in range(3000)])
+ham = bytearray((bozuk / "kitap.db").read_bytes())
+ham[4096 * 3 + 100:4096 * 3 + 1500] = b"\x55" * 1400  # b-ağacı sayfası bozuldu
+(bozuk / "kitap.db").write_bytes(bytes(ham))
+(bozuk / "yedek").mkdir()
+(bozuk / "yedek" / "kitap-2026-01-01.db").write_bytes(b"eski iyi yedek")
+calis = lambda: subprocess.run([sys.executable, str(Path(__file__).parent / "yedek.py")], capture_output=True,  # noqa
+                               text=True, env={**os.environ, "ARAPCA_VERI": str(bozuk)})
+r = calis()
+assert r.returncode == 1 and "yedek alınamadı" in r.stderr, r
+assert [f.name for f in (bozuk / "yedek").iterdir()] == ["kitap-2026-01-01.db"]  # bozuk kopya yok, eski silinmedi
+(bozuk / "kitap.db").write_bytes(b"veritabani degil" * 300)
+r = calis()
+assert r.returncode == 1 and "not a database" in r.stderr
+(bozuk / "kitap.db").unlink()
+assert calis().returncode == 1 and not (bozuk / "kitap.db").exists()  # salt okunur: boş veritabanı yaratmaz
+r = subprocess.run([sys.executable, str(Path(__file__).parent / "yedek.py")], capture_output=True, text=True,
+                   env={**os.environ, "ARAPCA_VERI": str(son_tur)})
+assert r.returncode == 0 and (son_tur / "yedek" / f"kitap-{date.today().isoformat()}.db").exists()
+shutil.rmtree(bozuk)
+
+# ---- DOCX çıktı seçenekleri: düzen, harekeli, katman, aralık, onaylı; dipnotlu düzende gerçek Word dipnotu ----
+dx = c.post("/api/upload", files=[("dosyalar", (f"d{i}.jpg", jpg())) for i in (1, 2, 3)]).json()["kitaplar"][0]["id"]
+dS = [s["id"] for s in c.get(f"/api/books/{dx}").json()["sayfalar"]]
+
+
+def talik(sid, ar, tr, lemma, bagli, durum="taslak"):
+    kid = pasaj(sid, "hasiye", ar, tr, durum)
+    uyg.yaz("UPDATE passages SET lemma=?, bagli_id=? WHERE id=?", lemma, bagli, kid)
+    return kid
+
+
+d_s1 = pasaj(dS[0], "serh", "(وفرض الوضوء) غسل الوجه", "**Abdestin farzı** yüzü yıkamaktır.", "onayli")
+uyg.yaz("UPDATE passages SET ar_vocalized=? WHERE id=?", "(وَفَرْضُ الْوُضُوءِ) غَسْلُ الْوَجْهِ", d_s1)
+d_t1 = talik(dS[0], "قوله وفرض الوضوء ) اي ركنه", "Yani rüknü; *âyet meali*.", "وفرض الوضوء", d_s1, "onayli")
+d_t2 = talik(dS[0], "قوله غسل الوجه ) حده", "Yüzün sınırı.", "غسل الوجه", d_s1)
+d_h1 = pasaj(dS[0], "hasiye", "كلام بلا قوله", "Bağsız hâşiye notu.", "onayli")
+pasaj(dS[0], "diger", "٦", "")
+d_s2 = pasaj(dS[1], "serh", "(ومسح الرأس)", "**Başı meshetmek.**", "onayli")
+d_t3 = talik(dS[2], "قوله ومسح ) ربع", "Dörtte biri.", "ومسح", d_s2)  # sonraki sayfadaki talik
+d_s3 = pasaj(dS[2], "serh", "قال", "", "taslak")  # çevrilmemiş
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def cikti(**params):
+    y = c.get(f"/api/books/{dx}/export.docx", params=params)
+    assert y.status_code == 200, (params, y.text)
+    return Document(io.BytesIO(y.content)), y
+
+
+def dipnotlar(belge):
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from lxml import etree
+    try:
+        parca = belge.part.part_related_by(RT.FOOTNOTES)
+    except KeyError:
+        return None
+    return etree.fromstring(parca.blob)
+
+
+# karşılıklı (eski düzen, varsayılan): harekeli yalnız rasm kontrolünden geçende; harekeli=false asıl metni verir
+belge, y = cikti()
+satirlar = belge.tables[0].rows
+assert len(satirlar) == 7 and "kitap-" in y.headers["content-disposition"]
+assert satirlar[0].cells[1].text == "(وَفَرْضُ الْوُضُوءِ) غَسْلُ الْوَجْهِ" and satirlar[0].cells[0].text.startswith("[s. 1 · serh]")
+assert satirlar[6].cells[0].text == "[s. 3 · serh] "
+belge, _ = cikti(harekeli="false")
+assert belge.tables[0].rows[0].cells[1].text == "(وفرض الوضوء) غسل الوجه"
+assert belge.tables[0].rows[0].cells[1].paragraphs[0]._p.pPr.find(W + "bidi") is not None
+uyg.yaz("UPDATE passages SET ar_vocalized=? WHERE id=?", "(وَفَرْضُ الْوُضُوعِ)", d_s1)  # harf değişmiş: kullanılmaz
+assert cikti()[0].tables[0].rows[0].cells[1].text == "(وفرض الوضوء) غسل الوجه"
+uyg.yaz("UPDATE passages SET ar_vocalized=? WHERE id=?", "(وَفَرْضُ الْوُضُوءِ) غَسْلُ الْوَجْهِ", d_s1)
+# katman / aralık / onaylı süzgeçleri
+metinler = lambda b: [r.cells[0].text for r in b.tables[0].rows]  # noqa: E731
+assert all("hasiye" in t for t in metinler(cikti(katman="hasiye")[0])) and len(metinler(cikti(katman="hasiye")[0])) == 4
+assert [t[:12] for t in metinler(cikti(bas=2, son=3)[0])] == ["[s. 2 · serh", "[s. 3 · hasi", "[s. 3 · serh"]
+assert len(metinler(cikti(bas=3)[0])) == 2 and len(metinler(cikti(son=1)[0])) == 4
+assert len(metinler(cikti(sadece_onayli="true")[0])) == 4
+assert len(metinler(cikti(katman=["serh", "hasiye"], sadece_onayli="true", bas=1, son=1)[0])) == 3
+# geçersiz birleşimler ve boş seçim
+for params, beklenen in (({"bas": 3, "son": 2}, "ters"), ({"duzen": "dipnotlu", "katman": "hasiye"}, "şerh"),
+                         ({"bas": 9}, "uyan pasaj yok"), ({"katman": "serh", "sadece_onayli": "true", "bas": 3}, "uyan")):
+    y = c.get(f"/api/books/{dx}/export.docx", params=params)
+    assert y.status_code == 422 and beklenen in y.json()["detail"], (params, y.text)
+for params in ({"duzen": "yok"}, {"katman": ""}, {"katman": "diger"}, {"bas": 0}, {"son": "x"}):
+    assert c.get(f"/api/books/{dx}/export.docx", params=params).status_code == 422, params
+# yalnız Türkçe: tablo yok, sayfa başlıkları, hâşiye etiketli ve lemmalı, biçim korunur
+belge, y = cikti(duzen="turkce")
+assert not belge.tables and "-turkce" in y.headers["content-disposition"]
+paragraflar = [(p.style.name, p.text) for p in belge.paragraphs]
+assert [t for st, t in paragraflar if st.startswith("Heading")] == ["s. 1", "s. 2", "s. 3"]
+assert ("Normal", "Abdestin farzı yüzü yıkamaktır.") in paragraflar
+assert ("Normal", "Hâşiye: وفرض الوضوء Yani rüknü; âyet meali.") in paragraflar
+assert ("Normal", "[çevrilmemiş]") in paragraflar and not any("٦" in t for _, t in paragraflar)
+kosular = {r.text: r for p in belge.paragraphs for r in p.runs}
+assert kosular["Abdestin farzı"].bold and kosular["âyet meali"].italic and kosular["وفرض الوضوء"].bold
+assert kosular["وفرض الوضوء"]._r.rPr.find(W + "rtl") is not None
+assert dipnotlar(belge) is None
+# dipnotlu: şerh ana metin, bağlı talikler dipnot (lemma + çeviri), bağsız hâşiye sayfa sonunda "Hâşiye" altında
+belge, y = cikti(duzen="dipnotlu")
+assert "-dipnotlu" in y.headers["content-disposition"] and not belge.tables
+dn = dipnotlar(belge)
+assert dn is not None and dn.tag == W + "footnotes"
+ayirici = [(f.get(W + "type"), f.get(W + "id")) for f in dn if f.get(W + "type")]
+assert ayirici == [("separator", "-1"), ("continuationSeparator", "0")]
+assert dn[0].find(f"{W}p/{W}r/{W}separator") is not None and dn[1].find(f".//{W}continuationSeparator") is not None
+notlar = {f.get(W + "id"): "".join(t.text for t in f.iter(W + "t")) for f in dn if not f.get(W + "type")}
+assert notlar == {"1": " وفرض الوضوء Yani rüknü; âyet meali.", "2": " غسل الوجه Yüzün sınırı.",
+                  "3": " ومسح Dörtte biri."}, notlar
+assert all(f.find(f".//{W}footnoteRef") is not None for f in dn if not f.get(W + "type"))
+govde = belge.element.body
+refler = [(r.get(W + "id"), "".join(t.text for t in r.getparent().getparent().iter(W + "t")))
+          for r in govde.iter(W + "footnoteReference")]
+assert [i for i, _ in refler] == ["1", "2", "3"]
+assert refler[0][1] == refler[1][1] == "Abdestin farzı yüzü yıkamaktır.," and refler[2][1] == "Başı meshetmek."
+assert all(r.getparent().find(f"{W}rPr/{W}vertAlign").get(W + "val") == "superscript"
+           for r in govde.iter(W + "footnoteReference"))
+paragraflar = [(p.style.name, p.text) for p in belge.paragraphs]
+assert [t for _, t in paragraflar] == ["s. 1", "Abdestin farzı yüzü yıkamaktır.,", "Hâşiye", "Bağsız hâşiye notu.",
+                                      "s. 2", "Başı meshetmek.", "s. 3", "[çevrilmemiş]"], paragraflar
+assert paragraflar[2][0] == "Heading 3" and "Yüzün sınırı" not in belge.element.xml.split("footnotes")[0]
+fn_kosu = {"".join(t.text for t in r.iter(W + "t")): r for r in dn.iter(W + "r")}
+assert fn_kosu["وفرض الوضوء"].find(f"{W}rPr/{W}rtl") is not None and fn_kosu["âyet meali"].find(f"{W}rPr/{W}i") is not None
+ozel = {pn.partname: pn.content_type for pn in belge.part.package.iter_parts()}
+assert ozel["/word/footnotes.xml"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+assert belge.settings.element.find(f"{W}footnotePr") is not None
+# süzgeçler dipnotlu düzende: aralık dışındaki şerhe bağlı talik bağsız hâşiye olur; onaylı süzgeci dipnotu da süzer
+belge, _ = cikti(duzen="dipnotlu", bas=3)
+assert [p.text for p in belge.paragraphs] == ["s. 3", "[çevrilmemiş]", "Hâşiye", "ومسح Dörtte biri."]
+assert dipnotlar(belge) is None
+belge, _ = cikti(duzen="dipnotlu", sadece_onayli="true")
+assert list({f.get(W + "id") for f in dipnotlar(belge) if not f.get(W + "type")}) == ["1"]
+assert [p.text for p in belge.paragraphs] == ["s. 1", "Abdestin farzı yüzü yıkamaktır.", "Hâşiye",
+                                             "Bağsız hâşiye notu.", "s. 2", "Başı meshetmek."]
+belge, _ = cikti(duzen="dipnotlu", katman="serh")
+assert dipnotlar(belge) is None and "Hâşiye" not in [p.text for p in belge.paragraphs]
+# LibreOffice varsa PDF'e çevrilir ve dipnotlar sayfada görünür
+import shutil as _sh  # noqa: E402
+if _sh.which("soffice"):
+    pdf_dizin = Path(tempfile.mkdtemp())
+    (pdf_dizin / "d.docx").write_bytes(c.get(f"/api/books/{dx}/export.docx", params={"duzen": "dipnotlu"}).content)
+    subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dizin), str(pdf_dizin / "d.docx")],
+                   capture_output=True, timeout=180)
+    with pymupdf.open(pdf_dizin / "d.pdf") as pdf:
+        yazi = "".join(sayfa.get_text() for sayfa in pdf)
+    assert "Yüzün sınırı." in yazi and "Dörtte biri." in yazi and "Bağsız hâşiye notu." in yazi
+    shutil.rmtree(pdf_dizin)
+    print("dipnotlu DOCX: LibreOffice ile PDF'e çevrildi, dipnotlar çıktıda")
+shutil.rmtree(son_tur)
+
+uyg.VERI = Path(os.environ["ARAPCA_VERI"])
 shutil.rmtree(os.environ["ARAPCA_VERI"])
 shutil.rmtree(eski)
 shutil.rmtree(onceki)
