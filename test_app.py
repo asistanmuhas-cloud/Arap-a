@@ -26,9 +26,13 @@ CEVIRI = []  # doluysa sahte çeviri sıradakini döndürür
 SOZLUK = []  # sahte sözlük adayı yanıtı (str)
 
 
+modeller = []  # (adım, kitap ayarından gelen model) — None: varsayılan kural
+
+
 def sahte(adim, contents, kayit=None, **config):
     cagrilar.append(adim)
     istekler.append((adim, contents))
+    modeller.append((adim, config.pop("model", None)))
     yanit = (OCR if adim == "ocr" else OCR2).get(contents[0]) if adim in ("ocr", "ocr2") else None
     if isinstance(yanit, Exception):
         raise yanit  # hata yanıtı faturalanmaz
@@ -101,6 +105,7 @@ llm.llm("sozluk", "x", kayit=defter.append)
 del os.environ["MODEL_SOZLUK"]
 assert istemci.configler[-1][0] == "gemini-3.5-flash"
 
+gercek_llm = llm.llm  # katman modeli testinde gerçek llm() sahte istemciyle çalışır
 llm.llm = sahte
 llm.resim = lambda yol: yol.name
 c = TestClient(uyg.app)
@@ -312,13 +317,16 @@ OCR2[dosya[3]] = "bozuk json"
 
 # kitap ayarları: varsayılan kapalı, doğrulanır, yalnızca verilen değişir
 k = c.get(f"/api/books/{bid}").json()
-assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False} and k["kuyruk"] == 0
+MODELSIZ = {"model_serh": None, "model_hasiye": None}  # katman modeli seçilmemiş: varsayılan çeviri modeli
+assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False,
+                     **MODELSIZ} and k["kuyruk"] == 0
 assert c.patch(f"/api/books/{bid}", json={"ayar": {"yok": True}}).status_code == 422
 assert c.patch(f"/api/books/{bid}", json={"ayar": {"talik_bol": "evet"}}).status_code == 422
 assert c.patch(f"/api/books/{bid}", json={"ayar": {"talik_bol": True}}).json()["ayar"] == {
-    "talik_bol": True, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False}
+    "talik_bol": True, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False, **MODELSIZ}
 y = c.patch(f"/api/books/{bid}", json={"ayar": {"cift_okuma": True}}).json()
-assert y["ayar"] == {"talik_bol": True, "cift_okuma": True, "ceviri_bellegi": True, "ayet_isaret": False} and y["ad"] == g["ad"]
+assert y["ayar"] == {"talik_bol": True, "cift_okuma": True, "ceviri_bellegi": True, "ayet_isaret": False,
+                     **MODELSIZ} and y["ad"] == g["ad"]
 assert [b["ayar"] for b in c.get("/api/books").json() if b["id"] == bid] == [y["ayar"]]
 
 # tahmin çift okumayla artar
@@ -529,7 +537,8 @@ with sqlite3.connect(onceki / "kitap.db") as e:
 (onceki / "sayfa" / "5-0001.jpg").write_bytes(jpg())
 uyg.VERI = onceki
 k = c.get("/api/books/5").json()
-assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False} and k["kuyruk"] == 1
+assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False,
+                     **MODELSIZ} and k["kuyruk"] == 1
 assert k["sayfalar"][0]["onayli"] == 1 and k["yonerge"] == ""
 pasajlar = c.get("/api/pages/1").json()["pasajlar"]
 assert [(p["ar"], p["tr"], p["kutu"], p["lemma"], p["supheli"]) for p in pasajlar] == [
@@ -1125,6 +1134,471 @@ if _sh.which("soffice"):
     shutil.rmtree(pdf_dizin)
     print("dipnotlu DOCX: LibreOffice ile PDF'e çevrildi, dipnotlar çıktıda")
 shutil.rmtree(son_tur)
+
+# ======== maliyet: katman modeli, yerel harekeleme, gece kuyruğu (temiz veri dizininde) ========
+import shlex  # noqa: E402
+
+from google.genai import types as gtypes  # noqa: E402
+
+maliyet_dizin = Path(tempfile.mkdtemp())
+uyg.VERI = maliyet_dizin
+uyg.GUNLUK_BUTCE, uyg.AYLIK_BUTCE = 3, 30
+
+
+def yanit_nesnesi(metin, neden="STOP"):
+    return SimpleNamespace(text=metin, candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name=neden))],
+                           usage_metadata=SimpleNamespace(prompt_token_count=1000, candidates_token_count=200,
+                                                          thoughts_token_count=300))
+
+
+class SahteSunucu:
+    """Gemini tarafı: uzak batch işleri ve yüklenen dosyalar (istemci yeniden kurulsa da durur)."""
+    def __init__(self):
+        self.isler, self.yuklenen, self.silinen, self.iptal, self.n = {}, [], [], [], 0
+        self.yanit = {}  # anahtar -> (metin, neden) ya da ("HATA", kod, ileti)
+        self.iptal_hatasi = None
+
+
+class SahteGemini:
+    """genai.Client yerine: models.generate_content, batches.create/get/cancel, files.upload/delete."""
+    def __init__(self, sunucu):
+        self.s, self.models, self.uretilen = sunucu, self, []
+        self.batches = SimpleNamespace(create=self.create, get=self.get, cancel=self.cancel)
+        self.files = SimpleNamespace(upload=self.upload, delete=lambda name: self.s.silinen.append(name))
+
+    def generate_content(self, model, contents, config):
+        self.uretilen.append((model, contents, config))
+        return yanit_nesnesi("Normal çeviri")
+
+    def create(self, model, src, config):
+        self.s.n += 1
+        ad = f"batches/{self.s.n}"
+        self.s.isler[ad] = {"model": model, "src": src, "config": config, "durum": "JOB_STATE_PENDING", "hata": None,
+                            "metadatasiz": False}
+        return SimpleNamespace(name=ad, state=gtypes.JobState("JOB_STATE_PENDING"))
+
+    def cancel(self, name):
+        if self.s.iptal_hatasi:
+            raise RuntimeError(self.s.iptal_hatasi)
+        self.s.iptal.append(name)
+        self.s.isler[name]["durum"] = "JOB_STATE_CANCELLED"
+
+    def upload(self, file, config):
+        self.s.yuklenen.append(Path(file).name)
+        return SimpleNamespace(name=f"files/{Path(file).stem}", uri=f"https://dosya/{Path(file).name}",
+                               mime_type=config["mime_type"])
+
+    def get(self, name):
+        i = self.s.isler[name]
+        liste = None
+        if i["durum"] == "JOB_STATE_SUCCEEDED":
+            liste = []
+            for r in i["src"]:
+                a = r["metadata"]["anahtar"]
+                y = self.s.yanit.get(a) or varsayilan_gece_yaniti(a, r)
+                meta = None if i["metadatasiz"] else r["metadata"]
+                if y[0] == "HATA":
+                    liste.append(SimpleNamespace(metadata=meta, response=None,
+                                                 error=SimpleNamespace(code=y[1], message=y[2])))
+                else:
+                    liste.append(SimpleNamespace(metadata=meta, response=yanit_nesnesi(*y), error=None))
+        return SimpleNamespace(name=name, state=gtypes.JobState(i["durum"]),
+                               error=SimpleNamespace(code=13, message=i["hata"]) if i["hata"] else None,
+                               dest=SimpleNamespace(inlined_responses=liste, file_name=None))
+
+
+def varsayilan_gece_yaniti(anahtar, r):
+    adim = anahtar.split(":")[0]
+    if adim in ("ocr", "ocr2"):
+        ad = r["contents"][0]  # File API ile verilen görüntüde Part
+        yanit = (OCR if adim == "ocr" else OCR2).get(ad) if isinstance(ad, str) else None
+        assert not isinstance(yanit, Exception)
+        return (yanit or json.dumps({"bloklar": [{"tur": "serh", "metin": AR}]}), "STOP")
+    return (f"Gece çevirisi {anahtar}", "STOP")
+
+
+def bitir(*adlar, durum="JOB_STATE_SUCCEEDED", hata=None):
+    for ad in adlar:
+        sunucu.isler[ad].update(durum=durum, hata=hata)
+
+
+sunucu = SahteSunucu()
+gemini = SahteGemini(sunucu)
+llm._client = gemini
+
+# ---- llm: model önceliği (kitap ayarı > MODEL_<ADIM> > MODELLER) ----
+assert llm.model_sec("ceviri") == "gemini-3.5-flash" and llm.model_sec("ceviri", "gemini-3.1-flash-lite") == "gemini-3.1-flash-lite"
+os.environ["MODEL_CEVIRI"] = "gemini-3.1-pro-preview"
+assert llm.model_sec("ceviri") == "gemini-3.1-pro-preview" and llm.model_sec("ceviri", "gemini-3.1-flash-lite") == "gemini-3.1-flash-lite"
+del os.environ["MODEL_CEVIRI"]
+d = []
+assert gercek_llm("ceviri", "x", kayit=d.append, model="gemini-3.1-flash-lite") == "Normal çeviri"
+assert gemini.uretilen[-1][0] == "gemini-3.1-flash-lite" and gemini.uretilen[-1][2]["max_output_tokens"] == 16000
+assert d == [{"model": "gemini-3.1-flash-lite", "girdi": 1000, "cikti": 500, "maliyet": (1000 * 0.25 + 500 * 1.5) / 1e6}]
+
+# ---- katman modeli: kitap ayarı, sunucu doğrulaması, fiyatlar ----
+km = c.post("/api/upload", files=[("dosyalar", (f"km{i}.jpg", jpg())) for i in (1, 2)]).json()["kitaplar"][0]["id"]
+kmS = [s["id"] for s in c.get(f"/api/books/{km}").json()["sayfalar"]]
+cfg = c.get("/api/config").json()
+assert cfg["modeller"] == [{"ad": m, "girdi": f[0], "cikti": f[1]} for m, f in llm.FIYAT.items()]
+assert cfg["ceviri_modeli"] == "gemini-3.5-flash" and cfg["batch_orani"] == 0.5
+assert cfg["hareke"] == {"motor": "gemini", "model": "gemini-3.5-flash"}
+for kotu in ({"model_serh": "gpt-9"}, {"model_serh": True}, {"model_hasiye": 5}, {"talik_bol": "gemini-3.5-flash"},
+             {"cift_okuma": None}, {"talik_bol": "evet"}):
+    y = c.patch(f"/api/books/{km}", json={"ayar": kotu})
+    assert y.status_code == 422, (kotu, y.text)
+assert "fiyat tablosunda olmayan" in c.patch(f"/api/books/{km}", json={"ayar": {"model_serh": "gpt-9"}}).json()["detail"]
+y = c.patch(f"/api/books/{km}", json={"ayar": {"model_serh": "gemini-3.1-flash-lite"}}).json()
+assert y["ayar"]["model_serh"] == "gemini-3.1-flash-lite" and y["ayar"]["model_hasiye"] is None and y["ayar"]["ceviri_bellegi"]
+uyg.yaz("UPDATE books SET ayar=? WHERE id=?", json.dumps({**y["ayar"], "model_hasiye": "kaldirilmis-model"}), km)
+assert c.get(f"/api/books/{km}").json()["ayar"]["model_hasiye"] is None  # tablodan çıkmış model varsayılana düşer
+k_serh = pasaj(kmS[0], "serh", "قال الشيخ فرض الوضوء")
+k_has = pasaj(kmS[0], "hasiye", "قوله فرض ) اي ركن")
+llm.llm = gercek_llm  # gerçek kural + sahte istemci: defter gerçek model ve fiyatı yazar
+defter_oncesi = len(uyg.sor("SELECT id FROM usage"))
+assert c.post(f"/api/passages/{k_serh}/translate").json()["tr"] == "Normal çeviri"
+assert c.post(f"/api/passages/{k_has}/translate").status_code == 200
+os.environ["MODEL_CEVIRI"] = "gemini-3.1-pro-preview"  # seçilmemiş katmanın varsayılanı olmaya devam eder
+c.patch(f"/api/passages/{k_serh}", json={"tr": ""})
+c.patch(f"/api/passages/{k_has}", json={"tr": ""})
+assert c.post(f"/api/pages/{kmS[0]}/process?asama=ceviri").status_code == 200  # toplu iş de aynı kural
+del os.environ["MODEL_CEVIRI"]
+d = uyg.sor("SELECT adim, model, maliyet, gece_id FROM usage")[defter_oncesi:]
+fiyat = lambda m, oran=1: llm.maliyet(m, 1000, 500) * oran  # noqa: E731
+assert [(r["adim"], r["model"]) for r in d] == [("ceviri", "gemini-3.1-flash-lite"), ("ceviri", "gemini-3.5-flash"),
+                                                 ("ceviri", "gemini-3.1-flash-lite"), ("ceviri", "gemini-3.1-pro-preview")], d
+assert all(r["maliyet"] == fiyat(r["model"]) and r["gece_id"] is None for r in d)
+assert c.patch(f"/api/books/{km}", json={"ayar": {"model_serh": None}}).json()["ayar"]["model_serh"] is None
+llm.llm = sahte
+
+# ---- yerel harekeleme: HAREKE_KOMUT ile gerçek alt süreç ----
+betik = maliyet_dizin / "hareke betiği.py"  # boşluklu yol: shlex ile tırnaklanır
+betik.write_text('''import sys, time
+kip = sys.argv[1]
+metin = sys.stdin.buffer.read().decode("utf-8")
+open(sys.argv[2], "w", encoding="utf-8").write(metin) if len(sys.argv) > 2 else None
+if kip == "hata":
+    sys.stderr.write("model yüklenemedi"); sys.exit(3)
+if kip == "bos":
+    sys.exit(0)
+if kip == "uyu":
+    time.sleep(5)
+cikti = "".join(h + ("\\u064e" if "\\u0621" <= h <= "\\u064a" else "") for h in metin)
+if kip == "harf":
+    cikti = cikti.replace("ظ", "ط")
+sys.stdout.buffer.write(cikti.encode("utf-8"))
+''', encoding="utf-8")
+komut = lambda kip, *ek: " ".join(shlex.quote(x) for x in (sys.executable, str(betik), kip, *ek))  # noqa: E731
+gelen = maliyet_dizin / "gelen.txt"
+TEHLIKE = "قال $(touch " + str(maliyet_dizin / "enjeksiyon") + "); `id` ' \" ظهر"
+assert llm.yerel_hareke(TEHLIKE, komut("ok", str(gelen))) and gelen.read_text(encoding="utf-8") == TEHLIKE
+assert not (maliyet_dizin / "enjeksiyon").exists()  # metin komut satırına girmedi, kabuk yok
+for kip, beklenen in (("hata", "3 koduyla çıktı: model yüklenemedi"), ("bos", "boş çıktı")):
+    try:
+        llm.yerel_hareke("قال", komut(kip))
+        raise AssertionError("hata bekleniyordu")
+    except RuntimeError as e:
+        assert beklenen in str(e), e
+for kotu, beklenen in (("", "boş"), ("'kapanmamış", "ayrıştırılamadı"), ("/yok/boyle/komut", "çalıştırılamadı")):
+    try:
+        llm.yerel_hareke("قال", kotu)
+        raise AssertionError("hata bekleniyordu")
+    except RuntimeError as e:
+        assert beklenen in str(e), e
+llm.HAREKE_ZAMAN = 1
+try:
+    llm.yerel_hareke("قال", komut("uyu"))
+    raise AssertionError("zaman aşımı bekleniyordu")
+except RuntimeError as e:
+    assert "zaman aşımı" in str(e)
+llm.HAREKE_ZAMAN = 120
+# uygulamada: bütçe dolu olsa bile çalışır, deftere 0 maliyetli "yerel" satırı, rasm kontrolü aynen
+k_h = pasaj(kmS[1], "serh", "(وفرض الوضوء) متعلق بظهر")
+uyg.GUNLUK_BUTCE = 0.0
+cagrilar.clear()
+assert c.post(f"/api/passages/{k_h}/vocalize").status_code == 429  # Gemini motoru bütçeye takılır
+os.environ["HAREKE_KOMUT"] = komut("ok")
+assert c.get("/api/config").json()["hareke"] == {"motor": "yerel", "model": "yerel"}
+p = c.post(f"/api/passages/{k_h}/vocalize").json()
+assert p["ar_vocalized"] == "".join(h + ("َ" if "ء" <= h <= "ي" else "") for h in "(وفرض الوضوء) متعلق بظهر")
+assert p["rasm"]["ayni"] and cagrilar == []  # LLM çağrılmadı
+r = uyg.sor("SELECT adim, model, girdi, cikti, maliyet, book_id, page_id, gece_id FROM usage ORDER BY id DESC LIMIT 1")[0]
+assert r == {"adim": "hareke", "model": "yerel", "girdi": 0, "cikti": 0, "maliyet": 0.0, "book_id": km,
+             "page_id": kmS[1], "gece_id": None}
+os.environ["HAREKE_KOMUT"] = komut("harf")  # yerel model harf değiştirdi: rasm kontrolü ve şüpheli kuyruğu yakalar
+p = c.post(f"/api/passages/{k_h}/vocalize").json()
+assert not p["rasm"]["imla"] and p["rasm"]["farklar"]
+assert [(m["tur"], m["kelime"]) for m in c.get(f"/api/books/{km}/queue").json() if m["passage_id"] == k_h] == [("hareke", "بظهر")]
+for kip, beklenen in (("hata", "model yüklenemedi"), ("bos", "boş çıktı")):
+    os.environ["HAREKE_KOMUT"] = komut(kip)
+    y = c.post(f"/api/passages/{k_h}/vocalize")
+    assert y.status_code == 502 and "hareke (yerel)" in y.json()["detail"] and beklenen in y.json()["detail"], y.text
+assert uyg.bul("passages", k_h)["ar_vocalized"] == p["ar_vocalized"]  # hata eski harekelemeyi silmedi
+del os.environ["HAREKE_KOMUT"]
+uyg.GUNLUK_BUTCE = 3
+
+# ---- gece kuyruğu: aynı içerikte iki kitap; biri normal yoldan, biri gece kuyruğundan ----
+c.post("/api/glossary", json={"ar": "فرض", "tr": "farz"})
+YON2 = "Müellif adları: Zeylaî."
+kitaplar_ = {}
+for ad in ("normal", "gece"):
+    b = c.post("/api/upload", files=[("dosyalar", (f"{ad}{i}.jpg", jpg())) for i in (1, 2, 3)]).json()["kitaplar"][0]["id"]
+    c.patch(f"/api/books/{b}", json={"ayar": {"talik_bol": True, "cift_okuma": True, "model_hasiye": "gemini-3.1-flash-lite"},
+                                     "yonerge": YON2})
+    s_ = {s["no"]: s["id"] for s in c.get(f"/api/books/{b}").json()["sayfalar"]}
+    dosya = {n: uyg.bul("pages", s_[n])["dosya"] for n in s_}
+    OCR[dosya[1]] = json.dumps({"bloklar": [{**b_, "kutu": k_} for b_, k_ in zip(S1, KUTULAR)]})
+    OCR[dosya[2]] = json.dumps({"bloklar": S2})
+    OCR[dosya[3]] = json.dumps({"bloklar": [{**b_, "kutu": [100, 50, 400, 950]} for b_ in S3]})
+    OCR2[dosya[1]] = json.dumps({"bloklar": [{**S1[5], "metin": serh1.replace("مدنية", "مدينة")}]})
+    OCR2[dosya[3]] = OCR[dosya[3]]
+    kitaplar_[ad] = (b, s_, dosya)
+kN, sN, _ = kitaplar_["normal"]
+kG, sG, dG = kitaplar_["gece"]
+OCR2[kitaplar_["normal"][2][2]] = RuntimeError("ikinci model kapalı")
+sunucu.yanit[f"ocr2:{sG[2]}"] = ("HATA", 503, "ikinci model kapalı")
+# normal yol (arayüzdeki toplu iş gibi: önce OCR, sonra çeviri)
+istekler.clear()
+modeller.clear()
+for n in (1, 2, 3):
+    c.post(f"/api/pages/{sN[n]}/process?asama=ocr")
+for n in (1, 2, 3):
+    c.post(f"/api/pages/{sN[n]}/process?asama=ceviri")
+normal_istek = [ct for a, ct in istekler if a == "ceviri"]
+normal_model = [m for a, m in modeller if a == "ceviri"]
+
+# tahmin yarı fiyat; seçim sınırı; bütçe reddi
+t = c.post(f"/api/books/{kG}/estimate?gece=true", json={"sayfalar": [1, 2, 3]}).json()
+tn = c.post(f"/api/books/{kG}/estimate", json={"sayfalar": [1, 2, 3]}).json()
+assert t["gece"] and abs(t["tahmin"] - tn["tahmin"] / 2) < 1e-12 and t["normal_tahmin"] == tn["tahmin"] and t["yeter"]
+assert abs(t["sayfa_basi"] - tn["sayfa_basi"] / 2) < 1e-12 and abs(t["ocr2_ek"] - tn["ocr2_ek"] / 2) < 1e-12
+y = c.post(f"/api/books/{kG}/batch", json={"sayfalar": list(range(1, 12))})
+assert y.status_code == 422 and "en fazla 10" in y.json()["detail"]
+assert c.post(f"/api/books/{kG}/batch", json={"sayfalar": [9]}).status_code == 422
+uyg.GUNLUK_BUTCE = uyg.harcama()["bugun"] + t["tahmin"] * 0.9
+y = c.post(f"/api/books/{kG}/batch", json={"sayfalar": [1, 2, 3]})
+assert y.status_code == 429 and "yarı fiyat" in y.json()["detail"] and not sunucu.isler and not uyg.sor("SELECT * FROM gece")
+uyg.GUNLUK_BUTCE = uyg.harcama()["bugun"] + t["tahmin"] * 1.5  # bir iş sığar, ikincisi rezerv yüzünden sığmaz
+
+# gönderim: OCR aşaması, model başına bir uzak iş (ocr: pro, ocr2: flash); istek normal OCR'la aynı
+g = c.post(f"/api/books/{kG}/batch", json={"sayfalar": [3, 1, 2]}).json()
+assert (g["durum"], g["asama"], g["etiket"], g["sayfalar"], g["uzak"]) == ("bekliyor", "ocr", "bekliyor (OCR)", [1, 2, 3], 2)
+assert abs(g["tahmin"] - t["tahmin"]) < 1e-12 and g["harcanan"] == 0 and g["kitap"]
+uz = {i["model"]: i for i in sunucu.isler.values()}
+assert set(uz) == {"gemini-3.1-pro-preview", "gemini-3.5-flash"}
+ocr_is = uz["gemini-3.1-pro-preview"]
+assert [r["metadata"]["anahtar"] for r in ocr_is["src"]] == [f"ocr:{sG[n]}" for n in (1, 2, 3)]
+assert all(r["contents"] == [dG[n], uyg.OCR_PROMPT] for n, r in zip((1, 2, 3), ocr_is["src"]))
+assert ocr_is["src"][0]["config"] == {**uyg.OCR_AYAR, "max_output_tokens": 16000} and ocr_is["config"]["display_name"]
+assert uz["gemini-3.5-flash"]["src"][0]["config"]["thinking_config"] == {"thinking_level": "low"}  # ocr2 kuralı
+h = c.get("/api/usage").json()
+assert abs(h["rezerv"] - g["tahmin"]) < 1e-12 and abs(h["kalan"] - (uyg.GUNLUK_BUTCE - h["bugun"] - g["tahmin"])) < 1e-9
+ikinci_kitap = c.post("/api/upload", files=[("dosyalar", (f"ik{i}.jpg", jpg())) for i in (1, 2, 3)]).json()["kitaplar"][0]["id"]
+c.patch(f"/api/books/{ikinci_kitap}", json={"ayar": {"cift_okuma": True}})
+y = c.post(f"/api/books/{ikinci_kitap}/batch", json={"sayfalar": [1, 2, 3]})
+assert y.status_code == 429 and len(sunucu.isler) == 2  # rezerv: iki kuyruk üst üste bütçeyi aşmaz
+assert c.post(f"/api/books/{ikinci_kitap}/prepare", json={"sayfalar": [1, 2, 3]}).status_code == 429  # normal iş de
+uyg.GUNLUK_BUTCE = 3
+
+# kuyruktaki sayfa elle işlenemez, yeniden kuyruğa atılamaz, silinemez
+for yol in (f"/api/pages/{sG[2]}/process", f"/api/pages/{sG[2]}/ocr", f"/api/books/{kG}/batch", f"/api/books/{kG}/prepare"):
+    y = c.post(yol, json={"sayfalar": [2]})
+    assert y.status_code == 409 and "gece kuyruğunda" in y.json()["detail"] and "s. 2" in y.json()["detail"], (yol, y.text)
+assert c.delete(f"/api/pages/{sG[1]}").status_code == 409 and c.delete(f"/api/books/{kG}").status_code == 409
+assert not uyg.ISLEM_KILIDI.locked()
+z = {s["no"]: s["gece"] for s in c.get(f"/api/books/{kG}").json()["sayfalar"]}
+assert z == {n: {"durum": "ocr", "is": g["id"]} for n in (1, 2, 3)}
+assert [x["id"] for x in c.get(f"/api/books/{kG}").json()["gece"]] == [g["id"]]
+
+# yoklama: uzak iş sürüyorsa bekler; bir uzak iş bitip öbürü sürüyorsa da bekler
+assert c.post("/api/batches/check").json()[0]["durum"] == "bekliyor"
+bitir([a for a, i in sunucu.isler.items() if i["model"] == "gemini-3.1-pro-preview"][0])
+assert c.post("/api/batches/check").json()[0]["asama"] == "ocr" and not uyg.sor("SELECT id FROM usage WHERE gece_id IS NOT NULL")
+
+# sunucu yeniden başladı: yeni istemci, şema yeniden açılıyor; iş veritabanından kaldığı yerden yoklanır
+gemini = SahteGemini(sunucu)
+llm._client = gemini
+uyg._hazir.discard(maliyet_dizin)
+bitir(*sunucu.isler)
+istekler.clear()
+cagrilar.clear()
+g = [x for x in c.post("/api/batches/check").json() if x["id"] == g["id"]][0]
+assert (g["durum"], g["asama"], g["etiket"]) == ("bekliyor", "ceviri", "OCR bitti, çeviri bekliyor") and cagrilar == []
+assert [h_["mesaj"] for h_ in g["hatalar"]] == [f"s. 2: ikinci okuma yapılamadı, birincil okuma kaydedildi "
+                                                 f"(ocr2: 503 ikinci model kapalı)"]
+# OCR sonuçları normal yolla aynı biçimde (kutu doğrulama, talik bölme, lemma bağı, çift okuma farkı)
+alanlar = lambda pid: [(p["tur"], p["ar"], p["kutu"], p["lemma"], p["supheli"], p["sira"],  # noqa: E731
+                        p["bagli_sayfa"] is not None) for p in c.get(f"/api/pages/{pid}").json()["pasajlar"]]
+for n in (1, 2, 3):
+    assert alanlar(sG[n]) == alanlar(sN[n]), n
+assert any(p["supheli"] for p in c.get(f"/api/pages/{sG[1]}").json()["pasajlar"])  # ocr2 farkı işaretlendi
+d = uyg.sor("SELECT adim, model, maliyet, page_id, book_id FROM usage WHERE gece_id=? ORDER BY id", g["id"])
+assert sorted((r["adim"], r["page_id"]) for r in d) == sorted([("ocr", sG[n]) for n in (1, 2, 3)] + [("ocr2", sG[1]), ("ocr2", sG[3])])
+assert all(r["maliyet"] == fiyat(r["model"], 0.5) and r["book_id"] == kG for r in d)  # yarı fiyat, hata yanıtı yok
+assert abs(g["harcanan"] - sum(r["maliyet"] for r in d)) < 1e-12
+assert abs(c.get("/api/usage").json()["rezerv"] - (g["tahmin"] - g["harcanan"])) < 1e-12
+# çeviri işi kendiliğinden gönderildi: model başına bir uzak iş, istekler normal çeviriyle birebir aynı
+cev = [i for a, i in sunucu.isler.items() if i["src"][0]["metadata"]["anahtar"].startswith("ceviri")]
+assert sorted(i["model"] for i in cev) == ["gemini-3.1-flash-lite", "gemini-3.5-flash"] and len(sunucu.isler) == 4
+gece_istek = {r["metadata"]["anahtar"]: r["contents"] for i in cev for r in i["src"]}
+pG = {n: c.get(f"/api/pages/{sG[n]}").json()["pasajlar"] for n in (1, 2, 3)}
+sirali = [p for n in (1, 2, 3) for p in pG[n] if p["tur"] != "diger"]
+assert len(gece_istek) == len(sirali) == len(normal_istek)
+for p, ct, m in zip(sirali, normal_istek, normal_model):
+    assert ct == gece_istek[f"ceviri:{p['page_id']}:{p['id']}"]
+    assert [i["model"] for i in cev if any(r["metadata"]["anahtar"] == f"ceviri:{p['page_id']}:{p['id']}" for r in i["src"])] == [
+        llm.model_sec("ceviri", m)]
+assert any("فرض = farz" in ct for ct in gece_istek.values()) and all(YON2 in ct for ct in gece_istek.values())
+assert any("[Önceki sayfanın sonu]" in ct for ct in gece_istek.values())
+assert all(r["config"] == {"thinking_config": {"thinking_level": "low"}, "max_output_tokens": 16000} for i in cev for r in i["src"])
+# çeviri sürerken: düzenleme serbest (ama çeviri/OCR değil); gelen sonuç çevrilmiş/onaylı pasajın üzerine yazmaz
+elle, onayli_, recit, kesik = sirali[0], sirali[1], sirali[2], sirali[3]
+assert c.post(f"/api/passages/{elle['id']}/translate").status_code == 409
+c.patch(f"/api/passages/{elle['id']}", json={"tr": "Elle çeviri"})
+c.patch(f"/api/passages/{onayli_['id']}", json={"tr": "Onaylı çeviri", "durum": "onayli"})
+sunucu.yanit[f"ceviri:{recit['page_id']}:{recit['id']}"] = ("", "RECITATION")
+sunucu.yanit[f"ceviri:{kesik['page_id']}:{kesik['id']}"] = ("yarım", "MAX_TOKENS")
+cev_adlar = [a for a, i in sunucu.isler.items() if i in cev]
+sunucu.isler[cev_adlar[0]]["metadatasiz"] = True  # metadata dönmezse istek sırasıyla eşlenir
+bitir(*cev_adlar)
+g = [x for x in c.post("/api/batches/check").json() if x["id"] == g["id"]][0]
+assert (g["durum"], g["etiket"]) == ("tamam", "tamam") and g["bitis"] and not c.get("/api/usage").json()["rezerv"]
+mesajlar = [h_["mesaj"] for h_ in g["hatalar"]]
+assert any("RECITATION" in m for m in mesajlar) and any("çıktı tavanına" in m for m in mesajlar) and len(mesajlar) == 3
+assert {h_["passage_id"] for h_ in g["hatalar"][1:]} == {recit["id"], kesik["id"]}
+yeni = {p["id"]: p for n in (1, 2, 3) for p in c.get(f"/api/pages/{sG[n]}").json()["pasajlar"]}
+assert yeni[elle["id"]]["tr"] == "Elle çeviri" and yeni[onayli_["id"]]["tr"] == "Onaylı çeviri"
+assert yeni[recit["id"]]["tr"] == "" and yeni[kesik["id"]]["tr"] == ""
+for p in sirali[4:]:
+    assert yeni[p["id"]]["tr"] == f"Gece çevirisi ceviri:{p['page_id']}:{p['id']}", p["id"]
+d = uyg.sor("SELECT adim, model, maliyet FROM usage WHERE gece_id=? AND adim='ceviri'", g["id"])
+assert len(d) == len(sirali) and all(r["maliyet"] == fiyat(r["model"], 0.5) for r in d)  # boş/kesik de faturalı
+# iş bitti: sayfalar yeniden elle işlenebilir; başarısız pasaj elle çevrilir
+z = {s["no"]: s["gece"] for s in c.get(f"/api/books/{kG}").json()["sayfalar"]}
+hatali_no = {n for n in (1, 2, 3) for p in pG[n] if p["id"] in (recit["id"], kesik["id"])}
+assert {n for n, v in z.items() if v} == hatali_no and all(z[n]["durum"] == "hata" for n in hatali_no)
+assert c.post(f"/api/passages/{recit['id']}/translate").status_code == 200
+c.post(f"/api/passages/{kesik['id']}/translate")
+assert not any(s["gece"] for s in c.get(f"/api/books/{kG}").json()["sayfalar"])  # sayfa bitince hata gösterilmez
+# tahmin: gece satırları normal fiyata çevrilerek ortalamaya girer
+ort = uyg.sor("""SELECT AVG(t) AS o FROM (SELECT SUM(CASE WHEN gece_id IS NULL THEN maliyet ELSE maliyet * 2 END) AS t
+                FROM usage WHERE page_id IS NOT NULL AND adim IN ('ocr','ceviri') GROUP BY page_id)""")[0]["o"]
+assert abs(c.post(f"/api/books/{kG}/estimate", json={"sayfalar": [1]}).json()["sayfa_basi"] - ort) < 1e-12
+
+# ---- kısmi OCR hatası, yalnız çeviri işi, görüntüler File API ile (inline sınırı aşılınca) ----
+kH = c.post("/api/upload", files=[("dosyalar", (f"h{i}.jpg", jpg())) for i in (1, 2)]).json()["kitaplar"][0]["id"]
+sH = {s["no"]: s["id"] for s in c.get(f"/api/books/{kH}").json()["sayfalar"]}
+sunucu.yanit[f"ocr:{sH[2]}"] = ("HATA", 400, "görüntü okunamadı")
+llm.BATCH_INLINE_SINIR = 0
+oncesi = set(sunucu.isler)
+gH = c.post(f"/api/books/{kH}/batch", json={"sayfalar": [1, 2]}).json()
+[yeniH] = [sunucu.isler[a] for a in set(sunucu.isler) - oncesi]
+assert sorted(sunucu.yuklenen[-2:]) == sorted(uyg.bul("pages", sH[n])["dosya"] for n in (1, 2))
+assert all(r["contents"][0].file_data.file_uri.startswith("https://dosya/") for r in yeniH["src"])
+llm.BATCH_INLINE_SINIR = 18 * 1024 * 1024
+bitir(*(set(sunucu.isler) - oncesi))
+gH = [x for x in c.post("/api/batches/check").json() if x["id"] == gH["id"]][0]
+assert gH["asama"] == "ceviri" and gH["durum"] == "bekliyor", gH
+assert sorted(sunucu.silinen) == sorted(f"files/{Path(uyg.bul('pages', sH[n])['dosya']).stem}" for n in (1, 2))
+assert [(h_["no"], h_["mesaj"]) for h_ in gH["hatalar"]] == [(2, "OCR: 400 görüntü okunamadı")]
+assert not c.get(f"/api/pages/{sH[2]}").json()["pasajlar"] and c.get(f"/api/pages/{sH[1]}").json()["pasajlar"]
+assert all(i["src"][0]["metadata"]["anahtar"].startswith(f"ceviri:{sH[1]}:")
+           for a, i in sunucu.isler.items() if a not in oncesi and i is not yeniH)
+# tümden başarısız (süresi dolmuş) çeviri işi: iş hata, sayfalar elle işlenebilir
+son = [a for a in sunucu.isler if a not in oncesi and sunucu.isler[a] is not yeniH]
+bitir(*son, durum="JOB_STATE_EXPIRED", hata="48 saatte tamamlanamadı")
+gH = [x for x in c.post("/api/batches/check").json() if x["id"] == gH["id"]][0]
+assert gH["durum"] == "hata" and "JOB_STATE_EXPIRED" in gH["hata"] and "48 saat" in gH["hata"]
+assert uyg.bekleyen_sayfalar() == {}
+assert c.post(f"/api/pages/{sH[2]}/process").status_code == 200  # elle işlenebilir
+z = {s["no"]: s["gece"] for s in c.get(f"/api/books/{kH}").json()["sayfalar"]}
+assert z[2] is None and z[1]["durum"] == "hata"  # çevrilmemiş kaldı, son işin hatası görünür
+# OCR'lanacak sayfa yoksa doğrudan çeviri işi; yalnız OCR işi tümden başarısız olursa iş hata
+oncesi = set(sunucu.isler)
+gH2 = c.post(f"/api/books/{kH}/batch", json={"sayfalar": [1]}).json()
+assert gH2["asama"] == "ceviri" and gH2["etiket"] == "OCR bitti, çeviri bekliyor"
+assert all(sunucu.isler[a]["src"][0]["metadata"]["anahtar"].startswith("ceviri:") for a in set(sunucu.isler) - oncesi)
+bitir(*(set(sunucu.isler) - oncesi), durum="JOB_STATE_FAILED", hata="iç hata")
+gH2 = [x for x in c.post("/api/batches/check").json() if x["id"] == gH2["id"]][0]
+assert gH2["durum"] == "hata" and "iç hata" in gH2["hata"] and not uyg.sor("SELECT id FROM usage WHERE gece_id=?", gH2["id"])
+y = c.post(f"/api/books/{kH}/batch", json={"sayfalar": [2]})
+assert y.status_code == 422 and "zaten" in y.json()["detail"]  # 2. sayfa elle çevrildi
+
+# ---- iptal: uzak iş de iptal edilir; iptal başarısızsa iş bekler ----
+kI = c.post("/api/upload", files=[("dosyalar", ("i1.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+sI = c.get(f"/api/books/{kI}").json()["sayfalar"][0]["id"]
+oncesi = set(sunucu.isler)
+gI = c.post(f"/api/books/{kI}/batch", json={"sayfalar": [1]}).json()
+sunucu.iptal_hatasi = "ağ yok"
+y = c.post(f"/api/batches/{gI['id']}/cancel")
+assert y.status_code == 502 and "ağ yok" in y.json()["detail"] and uyg.bul("gece", gI["id"])["durum"] == "bekliyor"
+sunucu.iptal_hatasi = None
+gI = c.post(f"/api/batches/{gI['id']}/cancel").json()
+assert (gI["durum"], gI["etiket"]) == ("iptal", "iptal edildi") and gI["bitis"] and sunucu.iptal[-1:] == list(set(sunucu.isler) - oncesi)
+assert c.post(f"/api/batches/{gI['id']}/cancel").status_code == 409 and c.post("/api/batches/999/cancel").status_code == 404
+assert c.post(f"/api/pages/{sI}/ocr").status_code == 200 and c.get("/api/usage").json()["rezerv"] == 0
+# gönderim yarıda kalırsa (ikinci uzak iş reddedildi) gönderilen de iptal edilir, iş kaydı kalmaz
+c.patch(f"/api/books/{kI}", json={"ayar": {"cift_okuma": True}})
+kJ = c.post("/api/upload", files=[("dosyalar", ("j1.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+c.patch(f"/api/books/{kJ}", json={"ayar": {"cift_okuma": True}})
+asil_create = gemini.create
+gemini.batches.create = lambda model, src, config: (asil_create(model, src, config) if "ocr2" not in config["display_name"]
+                                                    else (_ for _ in ()).throw(RuntimeError("kota aşıldı")))
+oncesi_is = len(uyg.sor("SELECT id FROM gece"))
+y = c.post(f"/api/books/{kJ}/batch", json={"sayfalar": [1]})
+assert y.status_code == 502 and "kota aşıldı" in y.json()["detail"] and len(uyg.sor("SELECT id FROM gece")) == oncesi_is
+assert sunucu.isler[sunucu.iptal[-1]]["config"]["display_name"].endswith("-ocr") and not uyg.ISLEM_KILIDI.locked()
+gemini.batches.create = asil_create
+
+# ---- arka plan yoklayıcısı: bekleyen işi kendiliğinden ilerletir; başka sayfa işlenirken o turu atlar ----
+oncesi = set(sunucu.isler)
+gJ = c.post(f"/api/books/{kJ}/batch", json={"sayfalar": [1]}).json()
+bitir(*(set(sunucu.isler) - oncesi))
+dur = threading.Event()
+uyg.ISLEM_KILIDI.acquire()
+is_ = threading.Thread(target=uyg.gece_yoklayici, args=(dur, 0.01))
+is_.start()
+time.sleep(0.2)
+assert uyg.bul("gece", gJ["id"])["asama"] == "ocr"  # kilit tutulurken dokunmadı
+uyg.ISLEM_KILIDI.release()
+bas = time.perf_counter()
+while uyg.bul("gece", gJ["id"])["asama"] != "ceviri" and time.perf_counter() - bas < 5:
+    time.sleep(0.02)
+dur.set()
+is_.join(2)
+assert uyg.bul("gece", gJ["id"])["asama"] == "ceviri" and not is_.is_alive()
+c.post(f"/api/batches/{gJ['id']}/cancel")
+liste = c.get("/api/batches").json()
+assert [x["id"] for x in liste] == sorted((x["id"] for x in liste), reverse=True) and {x["durum"] for x in liste} >= {"tamam", "hata", "iptal"}
+assert [x["book_id"] for x in c.get(f"/api/batches?kitap={kH}").json()] == [kH, kH] and c.get("/api/batches?kitap=999").status_code == 404
+# bitmiş işi olan kitap silinebilir; iş kayıtları gider, defter kalır
+defter_say = len(uyg.sor("SELECT id FROM usage"))
+assert c.delete(f"/api/books/{kH}").status_code == 200 and not uyg.sor("SELECT id FROM gece WHERE book_id=?", kH)
+assert len(uyg.sor("SELECT id FROM usage")) == defter_say
+shutil.rmtree(maliyet_dizin)
+
+# ---- önceki turun şemasından göç: usage.gece_id ve gece tablosu yok ----
+gocm = Path(tempfile.mkdtemp())
+with sqlite3.connect(gocm / "kitap.db") as e:
+    e.executescript("""
+        CREATE TABLE books(id INTEGER PRIMARY KEY, ad TEXT NOT NULL, dosya TEXT, sayfa_sayisi INTEGER NOT NULL,
+            olusturma TEXT NOT NULL DEFAULT (datetime('now','localtime')), ayar TEXT NOT NULL DEFAULT '{}',
+            yonerge TEXT NOT NULL DEFAULT '');
+        CREATE TABLE usage(id INTEGER PRIMARY KEY, zaman TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            adim TEXT NOT NULL, model TEXT NOT NULL, girdi INTEGER NOT NULL, cikti INTEGER NOT NULL,
+            maliyet REAL NOT NULL, book_id INTEGER, page_id INTEGER);
+        INSERT INTO books(id, ad, sayfa_sayisi, ayar) VALUES(3, 'Eski', 0, '{"talik_bol": true}');
+        INSERT INTO usage(adim, model, girdi, cikti, maliyet, book_id) VALUES('ceviri', 'gemini-3.5-flash', 10, 10, 0.25, 3);""")
+uyg.VERI = gocm
+h = c.get("/api/usage").json()
+assert h["bugun"] == 0.25 and h["rezerv"] == 0 and c.get("/api/batches").json() == []
+k = c.get("/api/books/3").json()
+assert k["ayar"]["talik_bol"] and k["ayar"]["model_serh"] is None and k["gece"] == []
+with closing(sqlite3.connect(gocm / "kitap.db")) as e:
+    assert "gece_id" in {r[1] for r in e.execute("PRAGMA table_info(usage)")}
+    assert e.execute("SELECT adim, maliyet, gece_id FROM usage").fetchall() == [("ceviri", 0.25, None)]
+shutil.rmtree(gocm)
+print("maliyet: katman modeli, yerel harekeleme, gece kuyruğu ok")
 
 uyg.VERI = Path(os.environ["ARAPCA_VERI"])
 shutil.rmtree(os.environ["ARAPCA_VERI"])

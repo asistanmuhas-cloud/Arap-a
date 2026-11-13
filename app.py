@@ -6,6 +6,7 @@
     uvicorn app:app --host 127.0.0.1 --port 8000
 Veri: data/kitap.db, data/kitap/ (yüklenen PDF'ler, küçük resimler) ve data/sayfa/ (işlenen sayfa
 görüntüleri); ARAPCA_VERI ile değiştirilebilir. Bütçe: GUNLUK_BUTCE_USD (3), AYLIK_BUTCE_USD (30).
+Yerel harekeleme: HAREKE_KOMUT (bkz. deploy/hareke_yerel.py). Gece kuyruğu yoklama aralığı: GECE_ARALIK_SN (300; 0 kapatır).
 """
 import io
 import json
@@ -16,17 +17,17 @@ import shutil
 import sqlite3
 import tempfile
 import threading
-from contextlib import closing, contextmanager
+from contextlib import asynccontextmanager, closing, contextmanager
 from datetime import datetime
 from difflib import SequenceMatcher
 from itertools import groupby
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 from starlette.background import BackgroundTask
 
 import llm as llm_modul
@@ -47,12 +48,15 @@ VARSAYILAN_OCR2_MALIYETI = 0.03  # USD; çift okumanın ikinci okuması için, d
 BAGLAM = 300  # komşu sayfadan çeviri isteğine eklenen bağlam (karakter)
 AZAMI_LEMMA = 100  # talik lemması (قوله ... ")") en fazla bu kadar karakter
 AZAMI_FARK = 4  # çift okumada bundan uzun ayrışma kelime farkı değil blok/katman kaymasıdır; sayılmaz
-AYARLAR = {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True,
-           "ayet_isaret": False}  # kitap ayarları (books.ayar JSON) ve varsayılanları
+AYARLAR = {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False,
+           "model_serh": None, "model_hasiye": None}  # kitap ayarları (books.ayar JSON) ve varsayılanları
+# seçmeli ayarlar: değer llm.FIYAT'taki bir model ya da None (varsayılan: MODEL_CEVIRI / llm.MODELLER["ceviri"])
+MODEL_AYARLARI = ("model_serh", "model_hasiye")
 AZAMI_YONERGE = 2000  # kitabın üslup yönergesi (books.yonerge) en fazla bu kadar karakter
 BELLEK_ADET, BELLEK_SINIR, BELLEK_ESIK = 3, 1500, 0.12  # çeviri belleği: örnek sayısı, toplam karakter, en az
 # benzerlik (gerçek sayfalarda aynı konudaki farklı sayfalar ≤0.09, şerh ile kendi hâşiyesi 0.10-0.16 çıktı)
 ADAY_SINIR = 20000  # sözlük adayı için gönderilen onaylı pasajların toplam karakteri
+GECE_ARALIK = int(os.environ.get("GECE_ARALIK_SN", "300"))  # gece kuyruğunu arka planda yoklama aralığı (sn)
 SURUM_SINIRI = 50  # pasaj başına saklanan en fazla sürüm (en eskiler silinir)
 AZAMI_NOT = 1000  # pasaj notu en fazla bu kadar karakter
 AZAMI_SONUC, ALINTI = 100, 40  # arama: en fazla sonuç; alıntıda eşleşmenin iki yanındaki karakter
@@ -80,8 +84,13 @@ CREATE TABLE IF NOT EXISTS glossary(
 CREATE TABLE IF NOT EXISTS usage(
     id INTEGER PRIMARY KEY, zaman TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     adim TEXT NOT NULL, model TEXT NOT NULL, girdi INTEGER NOT NULL, cikti INTEGER NOT NULL,
-    maliyet REAL NOT NULL, book_id INTEGER, page_id INTEGER);
+    maliyet REAL NOT NULL, book_id INTEGER, page_id INTEGER, gece_id INTEGER);
 CREATE INDEX IF NOT EXISTS usage_zaman ON usage(zaman);
+CREATE TABLE IF NOT EXISTS gece(
+    id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL, sayfalar TEXT NOT NULL, asama TEXT NOT NULL DEFAULT 'ocr',
+    durum TEXT NOT NULL DEFAULT 'bekliyor', uzak TEXT NOT NULL DEFAULT '[]', tahmin REAL NOT NULL DEFAULT 0,
+    hata TEXT, hatalar TEXT NOT NULL DEFAULT '[]',
+    olusturma TEXT NOT NULL DEFAULT (datetime('now','localtime')), guncelleme TEXT, bitis TEXT);
 """
 # books.dosya: VERI/kitap altındaki PDF yolu; görüntülerden oluşan kitapta NULL (sayfaları yüklenince oluşur).
 # pages.no: kitaptaki (PDF'teki) sayfa numarası. usage satırları kitap silinse de kalır (bütçe hesabı için).
@@ -92,6 +101,11 @@ CREATE INDEX IF NOT EXISTS usage_zaman ON usage(zaman);
 # passages.notu: kısa serbest not; isaretli: "tekrar bak" işareti (0/1). surumler: pasajın ar/tr metni her değiştiğinde
 # ÖNCEKİ metin (alan 'ar'|'tr'); neden: elle | ceviri (yeniden çeviri) | oneri (öneri kabulü) | geri (sürüme dönme) |
 # bolme (taliklere bölme). Pasaj silinince (sayfa silme, yeniden OCR) sürümleri de silinir.
+# usage.gece_id: satır gece kuyruğundaki (Batch API, yarı fiyat) işe ait; NULL ise normal çağrı. usage.model "yerel":
+# yerel harekeleme (maliyet 0). gece: Batch API işi; sayfalar JSON [page_id]; asama ocr | ceviri; durum bekliyor | tamam |
+# hata | iptal; uzak JSON [{ad, adim, model, anahtarlar, dosyalar}] (o aşamanın uzak işleri; model başına bir uzak iş);
+# tahmin: gönderimdeki yarı fiyatlı tahmin (iş beklerken, harcananı düşülerek bütçede ayrılır); hata: işin tamamını
+# durduran ya da son yoklamadaki geçici hata; hatalar JSON [{page_id, no, passage_id, mesaj}] tek tek başarısız yanıtlar.
 
 AGENT_PROMPT = """Aşağıda klasik Hanefî fıkıh metninden bir Arapça pasaj ve Türkçe çevirisi var.
 Çeviriyi asılla karşılaştır; yalnızca gerçek sorunlar için düzeltme öner: yanlış anlam, atlanmış ifade,
@@ -140,7 +154,18 @@ SOZLUK_SCHEMA = {
               "required": ["ar", "tr", "ornek"]},
 }
 
-app = FastAPI(title="Arapça çeviri çalışma alanı")
+@asynccontextmanager
+async def omur(_):
+    """Sunucu açıkken gece kuyruğunu GECE_ARALIK'ta bir yoklayan tek iş parçacığı (bekleyen işler veritabanında
+    durduğu için yeniden başlatmada kaldığı yerden yoklanır). TestClient bağlam yöneticisiz kullanılınca çalışmaz."""
+    dur = threading.Event()
+    if GECE_ARALIK > 0:
+        threading.Thread(target=gece_yoklayici, args=(dur, GECE_ARALIK), daemon=True, name="gece-kuyrugu").start()
+    yield
+    dur.set()
+
+
+app = FastAPI(title="Arapça çeviri çalışma alanı", lifespan=omur)
 _hazir: set = set()  # şeması kurulmuş/göçü yapılmış veri dizinleri
 _sema_kilidi = threading.Lock()
 ISLEM_KILIDI = threading.Lock()  # aynı anda tek sayfa işleme (çift tıklama/iki sekme harcamayı katlamasın)
@@ -158,6 +183,7 @@ def gec(c: sqlite3.Connection):
     """Eski şemadan göç: eksik sütunları ekler, sahipsiz sayfaları 'Eski sayfalar' kitabına bağlar."""
     sutun_ekle(c, "pages", "book_id INTEGER REFERENCES books(id)")
     sutun_ekle(c, "books", "ayar TEXT NOT NULL DEFAULT '{}'", "yonerge TEXT NOT NULL DEFAULT ''")
+    sutun_ekle(c, "usage", "gece_id INTEGER")
     sutun_ekle(c, "passages", "kutu TEXT", "lemma TEXT", "bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL",
                "supheli TEXT", "kapali TEXT", "notu TEXT NOT NULL DEFAULT ''", "isaretli INTEGER NOT NULL DEFAULT 0")
     sahipsiz = [r["id"] for r in c.execute("SELECT id FROM pages WHERE book_id IS NULL ORDER BY no, id")]
@@ -232,11 +258,15 @@ def pasaj_yaz(p: dict, alan: dict, neden: str) -> dict:
 
 # ---------- kullanım defteri ve bütçe ----------
 def harcama() -> dict:
+    """rezerv: bekleyen gece işlerinin tahmininden henüz harcanmamış kısmı; yeni işler için kalan bütçeden düşülür
+    (iki kuyruk üst üste bütçeyi aşmasın). Tek tek çağrıların bütçe denetimi (butce_kontrol) yalnız harcananı sayar."""
     h = sor("""SELECT COALESCE(SUM(CASE WHEN zaman >= date('now','localtime') THEN maliyet END), 0) AS bugun,
                       COALESCE(SUM(maliyet), 0) AS bu_ay
                FROM usage WHERE zaman >= date('now','localtime','start of month')""")[0]
-    return {**h, "gunluk_sinir": GUNLUK_BUTCE, "aylik_sinir": AYLIK_BUTCE,
-            "kalan": max(0.0, min(GUNLUK_BUTCE - h["bugun"], AYLIK_BUTCE - h["bu_ay"]))}
+    rezerv = sor("""SELECT COALESCE(SUM(MAX(0, g.tahmin - COALESCE((SELECT SUM(maliyet) FROM usage
+                    WHERE gece_id=g.id), 0))), 0) AS r FROM gece g WHERE g.durum='bekliyor'""")[0]["r"]
+    return {**h, "gunluk_sinir": GUNLUK_BUTCE, "aylik_sinir": AYLIK_BUTCE, "rezerv": rezerv,
+            "kalan": max(0.0, min(GUNLUK_BUTCE - h["bugun"], AYLIK_BUTCE - h["bu_ay"]) - rezerv)}
 
 
 def butce_kontrol():
@@ -249,28 +279,34 @@ def butce_kontrol():
                                  "AYLIK_BUTCE_USD ile sınırı yükseltmeden yeni çağrı yapılmaz.")
 
 
-def cagri(adim: str, contents, pid: Optional[int], bid: Optional[int] = None, **config) -> str:
-    """Bütçeyi denetler, LLM'i çağırır, her yanıtın kullanımını deftere yazar (sayfasız kitap işinde bid ile)."""
+def deftere_yaz(adim: str, k: dict, pid: Optional[int], bid: Optional[int] = None, gece_id: Optional[int] = None):
+    kitap = bid if bid is not None or not pid else sor("SELECT book_id FROM pages WHERE id=?", pid)[0]["book_id"]
+    yaz("INSERT INTO usage(adim, model, girdi, cikti, maliyet, book_id, page_id, gece_id) VALUES(?,?,?,?,?,?,?,?)",
+        adim, k["model"], k["girdi"], k["cikti"], k["maliyet"], kitap, pid, gece_id)
+
+
+def cagri(adim: str, contents, pid: Optional[int], bid: Optional[int] = None, model: Optional[str] = None,
+          **config) -> str:
+    """Bütçeyi denetler, LLM'i çağırır, her yanıtın kullanımını deftere yazar (sayfasız kitap işinde bid ile).
+    model: kitap ayarındaki katman modeli (None: llm.model_sec kuralı)."""
     butce_kontrol()
-    kitap = sor("SELECT book_id FROM pages WHERE id=?", pid)[0]["book_id"] if pid else bid
-    kaydet = lambda k: yaz("INSERT INTO usage(adim, model, girdi, cikti, maliyet, book_id, page_id) VALUES(?,?,?,?,?,?,?)",
-                           adim, k["model"], k["girdi"], k["cikti"], k["maliyet"], kitap, pid)
-    return llm_modul.llm(adim, contents, kayit=kaydet, **config)
+    return llm_modul.llm(adim, contents, kayit=lambda k: deftere_yaz(adim, k, pid, bid), model=model, **config)
 
 
-def ai(adim: str, contents, pid: Optional[int] = None, bid: Optional[int] = None, **config) -> str:
+def ai(adim: str, contents, pid: Optional[int] = None, bid: Optional[int] = None, model: Optional[str] = None,
+       **config) -> str:
     try:
-        return cagri(adim, contents, pid, bid, **config)
+        return cagri(adim, contents, pid, bid, model, **config)
     except HTTPException:
         raise
     except Exception as e:  # API/kota/ağ hatası arayüze okunur biçimde gitsin
         raise HTTPException(502, f"{adim}: {type(e).__name__}: {str(e)[:300]}")
 
 
-def ai_parcali(adim: str, istek, metin: str, pid: Optional[int] = None) -> str:
+def ai_parcali(adim: str, istek, metin: str, pid: Optional[int] = None, model: Optional[str] = None) -> str:
     """istek(parça) -> prompt. RECITATION engelinde metni bölerek dener (bkz. parcali)."""
     try:
-        return parcali(lambda m: cagri(adim, istek(m), pid), metin)
+        return parcali(lambda m: cagri(adim, istek(m), pid, model=model), metin)
     except HTTPException:
         raise
     except Exception as e:
@@ -290,6 +326,17 @@ def tek_is():
 @app.get("/api/usage")
 def kullanim():
     return harcama()
+
+
+@app.get("/api/config")
+def sunucu_ayarlari():
+    """Arayüzün gösterdiği sunucu ayarları: seçilebilir modeller ve 1M token fiyatları (USD), varsayılan çeviri modeli,
+    harekeleme motoru (HAREKE_KOMUT varsa yerel), gece kuyruğu fiyat oranı ve yoklama aralığı."""
+    yerel = bool(os.environ.get("HAREKE_KOMUT", "").strip())
+    return {"modeller": [{"ad": m, "girdi": f[0], "cikti": f[1]} for m, f in llm_modul.FIYAT.items()],
+            "ceviri_modeli": llm_modul.model_sec("ceviri"),
+            "hareke": {"motor": "yerel" if yerel else "gemini", "model": "yerel" if yerel else llm_modul.model_sec("hareke")},
+            "batch_orani": llm_modul.BATCH_ORAN, "gece_aralik": GECE_ARALIK}
 
 
 # ---------- yardımcılar ----------
@@ -318,9 +365,11 @@ def json_oku(ham, bos):
 
 
 def ayar_coz(ham) -> dict:
+    """Seçmeli ayarda tabloda olmayan (ör. sonradan kaldırılmış) model varsayılana (None) düşer."""
     kayitli = json_oku(ham, {})
     kayitli = kayitli if isinstance(kayitli, dict) else {}
-    return {k: bool(kayitli.get(k, v)) for k, v in AYARLAR.items()}
+    return {k: (kayitli.get(k) if kayitli.get(k) in llm_modul.FIYAT else None) if k in MODEL_AYARLARI
+            else bool(kayitli.get(k, v)) for k, v in AYARLAR.items()}
 
 
 def kitap_ayari(bid: int) -> dict:
@@ -754,12 +803,14 @@ def kitap(bid: int):
     k["isaretli"] = sum(s["isaretli"] for s in k["sayfalar"])
     k["ayar"] = ayar_coz(k["ayar"])
     k["kuyruk"] = len(kuyruk(bid))
+    k["gece"] = gece_listesi(bid)
+    gece_sayfa_durumu(k["sayfalar"], k["gece"])
     return k
 
 
 class KitapGuncelle(BaseModel):
     ad: Optional[str] = Field(None, min_length=1, max_length=200)
-    ayar: Optional[dict[str, StrictBool]] = None  # yalnızca verilen ayarlar değişir
+    ayar: Optional[dict[str, Union[StrictBool, StrictStr, None]]] = None  # yalnızca verilen ayarlar değişir
     yonerge: Optional[str] = Field(None, max_length=AZAMI_YONERGE)  # boş metin yönergeyi kaldırır
 
 
@@ -774,6 +825,12 @@ def kitap_guncelle(bid: int, g: KitapGuncelle):
         bilinmeyen = set(g.ayar) - set(AYARLAR)
         if bilinmeyen:
             raise HTTPException(422, f"Bilinmeyen ayar: {', '.join(sorted(bilinmeyen))}")
+        for ad, deger in g.ayar.items():
+            if ad in MODEL_AYARLARI and deger is not None and deger not in llm_modul.FIYAT:
+                raise HTTPException(422, f"{ad}: fiyat tablosunda olmayan model ({deger}); seçenekler: "
+                                         + ", ".join(llm_modul.FIYAT))
+            if ad not in MODEL_AYARLARI and not isinstance(deger, bool):
+                raise HTTPException(422, f"{ad}: açık/kapalı (true/false) olmalı")
         yaz("UPDATE books SET ayar=? WHERE id=?", json.dumps({**ayar_coz(k["ayar"]), **g.ayar}), bid)
     if g.yonerge is not None:
         yaz("UPDATE books SET yonerge=? WHERE id=?", g.yonerge.strip(), bid)
@@ -784,10 +841,13 @@ def kitap_guncelle(bid: int, g: KitapGuncelle):
 @app.delete("/api/books/{bid}")
 def kitap_sil(bid: int):
     bul("books", bid)
+    if sor("SELECT 1 FROM gece WHERE book_id=? AND durum='bekliyor'", bid):
+        raise HTTPException(409, "Bu kitabın gece kuyruğunda bekleyen işi var; önce işi iptal et.")
     dosyalar = [s["dosya"] for s in sor("SELECT dosya FROM pages WHERE book_id=?", bid)]
     with closing(db()) as c, c:
         c.execute("DELETE FROM pages WHERE book_id=?", (bid,))  # pasajlar CASCADE ile gider
         c.execute("DELETE FROM books WHERE id=?", (bid,))
+        c.execute("DELETE FROM gece WHERE book_id=?", (bid,))  # bitmiş işlerin kaydı (defter satırları kalır)
     for d in dosyalar:
         (VERI / "sayfa" / d).unlink(missing_ok=True)
     shutil.rmtree(VERI / "kitap" / str(bid), ignore_errors=True)
@@ -844,18 +904,19 @@ def secim_dogrula(bid: int, secim: Secim) -> tuple[dict, list]:
 
 def tahmin_hesapla(bid: int, nolar: list) -> dict:
     """Seçimin tahmini maliyeti: defterdeki sayfa başı ortalama (OCR+çeviri) ya da varsayılan; çift okuma açıksa
-    OCR'lanacak her sayfaya ikinci okumanın ortalaması eklenir."""
+    OCR'lanacak her sayfaya ikinci okumanın ortalaması eklenir. Gece kuyruğu satırları normal fiyata çevrilerek sayılır.
+    kalan: bekleyen gece işleri için ayrılan düşülmüş bütçe."""
     ozet = sor(SAYFA_OZETI + " WHERE p.book_id=?", bid)
     bitmis = {s["no"] for s in ozet if s["blok"] and not s["cevrilmemis"]}
     okunmus = {s["no"] for s in ozet if s["blok"]}
     islenecek = [n for n in nolar if n not in bitmis]
-    ortalama_sql = """SELECT AVG(t) AS o FROM (SELECT SUM(maliyet) AS t FROM usage
-                      WHERE page_id IS NOT NULL AND adim IN ({}) GROUP BY page_id)"""
-    ortalama = sor(ortalama_sql.format("'ocr','ceviri'"))[0]["o"]
+    ortalama_sql = """SELECT AVG(t) AS o FROM (SELECT SUM(CASE WHEN gece_id IS NULL THEN maliyet ELSE maliyet / ? END)
+                      AS t FROM usage WHERE page_id IS NOT NULL AND adim IN ({}) GROUP BY page_id)"""
+    ortalama = sor(ortalama_sql.format("'ocr','ceviri'"), llm_modul.BATCH_ORAN)[0]["o"]
     sayfa_basi = ortalama or VARSAYILAN_SAYFA_MALIYETI
     cift = kitap_ayari(bid)["cift_okuma"]
     ocr2_ek = (len([n for n in islenecek if n not in okunmus])
-               * (sor(ortalama_sql.format("'ocr2'"))[0]["o"] or VARSAYILAN_OCR2_MALIYETI)) if cift else 0.0
+               * (sor(ortalama_sql.format("'ocr2'"), llm_modul.BATCH_ORAN)[0]["o"] or VARSAYILAN_OCR2_MALIYETI)) if cift else 0.0
     h = harcama()
     tahmin = len(islenecek) * sayfa_basi + ocr2_ek
     return {"secilen": len(nolar), "islenecek": len(islenecek), "sayfa_basi": sayfa_basi,
@@ -870,18 +931,40 @@ def kuyruk_listesi(bid: int):
     return kuyruk(bid)
 
 
+def gece_tahmin(bid: int, nolar: list) -> dict:
+    """Gece kuyruğu tahmini: normal tahminin BATCH_ORAN katı (normal_tahmin: tam fiyatlısı)."""
+    t = tahmin_hesapla(bid, nolar)
+    o = llm_modul.BATCH_ORAN
+    t.update(gece=True, normal_tahmin=t["tahmin"], tahmin=t["tahmin"] * o, sayfa_basi=t["sayfa_basi"] * o,
+             ocr2_ek=t["ocr2_ek"] * o)
+    t["yeter"] = t["tahmin"] <= t["kalan"]
+    return t
+
+
 @app.post("/api/books/{bid}/estimate")
-def tahmin(bid: int, secim: Secim):
-    return tahmin_hesapla(bid, secim_dogrula(bid, secim)[1])
+def tahmin(bid: int, secim: Secim, gece: bool = False):
+    nolar = secim_dogrula(bid, secim)[1]
+    return gece_tahmin(bid, nolar) if gece else tahmin_hesapla(bid, nolar)
+
+
+def secim_kuyrukta_degil(bid: int, nolar: list):
+    kuyrukta_degil(*[r["id"] for r in sor(f"SELECT id FROM pages WHERE book_id=? AND no IN ({','.join('?' * len(nolar))})",
+                                          bid, *nolar)])
 
 
 @app.post("/api/books/{bid}/prepare")
 def hazirla(bid: int, secim: Secim):
-    """Seçilen sayfalar için 200 dpi görüntü ve pages satırı oluşturur (LLM çağrısı yok)."""
+    """Seçilen sayfalar için 200 dpi görüntü ve pages satırı oluşturur (LLM çağrısı yok). Gece kuyruğundaki sayfa 409."""
     k, nolar = secim_dogrula(bid, secim)
+    secim_kuyrukta_degil(bid, nolar)
     t = tahmin_hesapla(bid, nolar)
     if not t["yeter"]:
         raise HTTPException(429, f"{t['islenecek']} sayfa ≈ ${t['tahmin']:.2f}, kalan bütçe ${t['kalan']:.2f}; iş başlatılmadı.")
+    return sayfalari_hazirla(k, nolar)
+
+
+def sayfalari_hazirla(k: dict, nolar: list) -> list:
+    bid = k["id"]
     var = {s["no"] for s in sor("SELECT no FROM pages WHERE book_id=?", bid)}
     eksik = [n for n in nolar if n not in var]
     if eksik:  # yalnızca PDF kitapta olur; görüntü kitabının sayfaları yüklenince oluşur
@@ -1234,6 +1317,7 @@ def sayfa_resmi(pid: int):
 @app.delete("/api/pages/{pid}")
 def sayfa_sil(pid: int):
     s = bul("pages", pid)
+    kuyrukta_degil(pid)
     k = bul("books", s["book_id"])
     with closing(db()) as c, c:
         c.execute("DELETE FROM pages WHERE id=?", (pid,))
@@ -1245,9 +1329,10 @@ def sayfa_sil(pid: int):
     return {"silindi": pid}
 
 
-def ocr_oku(adim: str, s: dict) -> list:
-    ham = ai(adim, [llm_modul.resim(VERI / "sayfa" / s["dosya"]), OCR_PROMPT], s["id"],
-             response_mime_type="application/json", response_schema=OCR_SCHEMA)
+OCR_AYAR = {"response_mime_type": "application/json", "response_schema": OCR_SCHEMA}
+
+
+def ocr_coz(adim: str, ham: str) -> list:
     try:
         return [{"tur": b["tur"], "metin": b["metin"].strip(), "kutu": kutu_dogrula(b.get("kutu"))}
                 for b in json.loads(ham)["bloklar"] if b["metin"].strip()]
@@ -1255,32 +1340,43 @@ def ocr_oku(adim: str, s: dict) -> list:
         raise HTTPException(502, f"{adim} yanıtı çözümlenemedi: {e}")
 
 
+def ocr_oku(adim: str, s: dict) -> list:
+    return ocr_coz(adim, ai(adim, [llm_modul.resim(VERI / "sayfa" / s["dosya"]), OCR_PROMPT], s["id"], **OCR_AYAR))
+
+
+def ocr_kaydet(s: dict, bloklar: list, ikinci=None) -> list:
+    """Okunan blokları sayfanın pasajları olarak kaydeder (eskileri silinir); ikinci() çift okumanın bloklarını verir
+    (kapalıysa None) ve farklar işaretlenir; hata verirse birincil okuma kaydedilir. Kitap ayarına göre hâşiye
+    taliklere bölünür. Normal OCR ve gece kuyruğu aynı yoldan kaydeder. Uyarıları döndürür."""
+    uyarilar, supheli = [], {}
+    if ikinci:
+        try:
+            supheli = okuma_karsilastir(bloklar, ikinci())
+        except HTTPException as e:
+            uyarilar.append(f"s. {s['no']}: ikinci okuma yapılamadı, birincil okuma kaydedildi ({e.detail})")
+    with closing(db()) as c, c:
+        c.execute("DELETE FROM passages WHERE page_id=?", (s["id"],))
+        c.executemany("INSERT INTO passages(page_id, sira, tur, ar, kutu, supheli) VALUES(?,?,?,?,?,?)",
+                      [(s["id"], i, b["tur"], b["metin"], json.dumps(b["kutu"]) if b["kutu"] else None,
+                        json.dumps(supheli[i], ensure_ascii=False) if supheli.get(i) else None)
+                       for i, b in enumerate(bloklar)])
+    if kitap_ayari(s["book_id"])["talik_bol"]:
+        talik_bol(s["id"])
+    return uyarilar
+
+
 def ocr_yap(pid: int) -> list:
     """Sayfayı okur; kitap ayarına göre ikinci modelle de okuyup farkları işaretler ve hâşiyeyi taliklere böler.
     İkinci okuma yalnızca karşılaştırma içindir; hata verirse birincil sonuç kaydedilir. Uyarıları döndürür."""
     s = bul("pages", pid)
-    ayar = kitap_ayari(s["book_id"])
     bloklar = ocr_oku("ocr", s)
-    uyarilar, supheli = [], {}
-    if ayar["cift_okuma"]:
-        try:
-            supheli = okuma_karsilastir(bloklar, ocr_oku("ocr2", s))
-        except HTTPException as e:
-            uyarilar.append(f"s. {s['no']}: ikinci okuma yapılamadı, birincil okuma kaydedildi ({e.detail})")
-    with closing(db()) as c, c:
-        c.execute("DELETE FROM passages WHERE page_id=?", (pid,))
-        c.executemany("INSERT INTO passages(page_id, sira, tur, ar, kutu, supheli) VALUES(?,?,?,?,?,?)",
-                      [(pid, i, b["tur"], b["metin"], json.dumps(b["kutu"]) if b["kutu"] else None,
-                        json.dumps(supheli[i], ensure_ascii=False) if supheli.get(i) else None)
-                       for i, b in enumerate(bloklar)])
-    if ayar["talik_bol"]:
-        talik_bol(pid)
-    return uyarilar
+    return ocr_kaydet(s, bloklar, (lambda: ocr_oku("ocr2", s)) if kitap_ayari(s["book_id"])["cift_okuma"] else None)
 
 
 @app.post("/api/pages/{pid}/ocr")
 def ocr(pid: int, zorla: bool = False):
     bul("pages", pid)
+    kuyrukta_degil(pid)
     emek = sor("SELECT COUNT(*) AS n FROM passages WHERE page_id=? AND (tr!='' OR durum='onayli' OR notu!='' "
                "OR isaretli=1)", pid)[0]["n"]
     if emek and not zorla:
@@ -1295,8 +1391,10 @@ def ocr(pid: int, zorla: bool = False):
 def isle(pid: int, asama: Literal["hepsi", "ocr", "ceviri"] = "hepsi"):
     """Toplu işin bir sayfası: OCR'lanmamışsa OCR, sonra çevirisi boş şerh/hâşiye pasajlarının çevirisi.
     Harekeleme yapılmaz. İşlenmiş sayfada OCR tekrarlanmaz, çevirisi olan pasaj yeniden çevrilmez.
-    Toplu iş önce bütün sayfalar için asama=ocr, sonra asama=ceviri çağırır; böylece çeviride komşu sayfa hazırdır."""
+    Toplu iş önce bütün sayfalar için asama=ocr, sonra asama=ceviri çağırır; böylece çeviride komşu sayfa hazırdır.
+    Gece kuyruğundaki sayfa 409."""
     bul("pages", pid)
+    kuyrukta_degil(pid)
     uyarilar = []
     with tek_is():
         if asama != "ceviri" and not sor("SELECT 1 FROM passages WHERE page_id=? LIMIT 1", pid):
@@ -1360,14 +1458,20 @@ def surume_don(kid: int, vid: int):
     return pasaj_yaz(p, {s[0]["alan"]: s[0]["metin"]}, "geri")
 
 
-def ceviri_yap(p: dict):
-    """Çeviri isteği: sözlük, kitap yönergesi, çeviri belleği örnekleri, âyet kuralı (ayarlara göre), komşu sayfa
-    bağlamı ve en sonda asıl metin."""
+def ceviri_hazirla(p: dict) -> tuple:
+    """Çeviri isteğinin asıl metinden önceki kısmı ve katman modeli: sözlük, kitap yönergesi, çeviri belleği örnekleri,
+    âyet kuralı (ayarlara göre), komşu sayfa bağlamı; model kitabın model_<katman> ayarı (None: varsayılan).
+    Tek pasaj "Çevir", toplu iş ve gece kuyruğu aynı isteği kurar."""
     k = bul("books", bul("pages", p["page_id"])["book_id"])
     ayar = ayar_coz(k["ayar"])
     ek = (sozluk_metni(p["ar"]) + yonerge_metni(k) + (bellek_metni(p, k["id"]) if ayar["ceviri_bellegi"] else "")
           + (AYET_PROMPT if ayar["ayet_isaret"] else "") + komsu_baglam(p))
-    tr = ai_parcali("ceviri", lambda m: ek + CEVIRI_PROMPT.format(metin=m), p["ar"], p["page_id"])
+    return ek, ayar.get(f"model_{p['tur']}")
+
+
+def ceviri_yap(p: dict):
+    ek, model = ceviri_hazirla(p)
+    tr = ai_parcali("ceviri", lambda m: ek + CEVIRI_PROMPT.format(metin=m), p["ar"], p["page_id"], model)
     pasaj_yaz(bul("passages", p["id"]), {"tr": tr}, "ceviri")  # çeviri sürerken yapılan düzenleme de sürüm olur
 
 
@@ -1376,6 +1480,7 @@ def cevir(kid: int):
     p = bul("passages", kid)
     if p["durum"] == "onayli":
         raise HTTPException(409, "Onaylı pasaj yeniden çevrilmez; önce onayı kaldır")
+    kuyrukta_degil(p["page_id"])
     ceviri_yap(p)
     return zengin(bul("passages", kid))
 
@@ -1397,8 +1502,18 @@ def madde_kapat(kid: int, k: Kapat):
 
 @app.post("/api/passages/{kid}/vocalize")
 def harekele(kid: int):
+    """HAREKE_KOMUT ayarlıysa yerel komutla (bütçeden düşmez; deftere maliyeti 0, modeli "yerel" satır yazılır), değilse
+    Gemini ile. Rasm kontrolü ikisinde de aynı (zengin, şüpheli kuyruğu)."""
     p = bul("passages", kid)
-    harekeli = ai_parcali("hareke", lambda m: HAREKE_PROMPT.format(metin=m), p["ar"], p["page_id"])
+    komut = os.environ.get("HAREKE_KOMUT", "").strip()
+    if komut:
+        try:
+            harekeli = llm_modul.yerel_hareke(p["ar"], komut)
+        except RuntimeError as e:
+            raise HTTPException(502, f"hareke (yerel): {e}")
+        deftere_yaz("hareke", {"model": "yerel", "girdi": 0, "cikti": 0, "maliyet": 0.0}, p["page_id"])
+    else:
+        harekeli = ai_parcali("hareke", lambda m: HAREKE_PROMPT.format(metin=m), p["ar"], p["page_id"])
     yaz("UPDATE passages SET ar_vocalized=? WHERE id=?", harekeli, kid)
     return zengin(bul("passages", kid))
 
@@ -1483,3 +1598,301 @@ def terim_sil(tid: int):
     bul("glossary", tid)
     yaz("DELETE FROM glossary WHERE id=?", tid)
     return sozluk()
+
+
+# ---------- gece kuyruğu (Gemini Batch API, yarı fiyat) ----------
+GECE_ETIKET = {("bekliyor", "ocr"): "bekliyor (OCR)", ("bekliyor", "ceviri"): "OCR bitti, çeviri bekliyor",
+               ("tamam", None): "tamam", ("hata", None): "hata", ("iptal", None): "iptal edildi"}
+
+
+def bekleyen_sayfalar() -> dict:
+    """Bekleyen gece işlerindeki sayfalar: {page_id: iş id}."""
+    return {pid: g["id"] for g in sor("SELECT id, sayfalar FROM gece WHERE durum='bekliyor'")
+            for pid in json_oku(g["sayfalar"], [])}
+
+
+def kuyrukta_degil(*pidler):
+    """Sayfa bekleyen bir gece işindeyse 409: aynı sayfa elle işlenmez ya da yeniden kuyruğa atılmaz."""
+    b = bekleyen_sayfalar()
+    dolu = [p for p in pidler if p in b]
+    if dolu:
+        nolar = ", ".join(str(r["no"]) for r in sor(f"SELECT no FROM pages WHERE id IN ({','.join('?' * len(dolu))}) "
+                                                     "ORDER BY no", *dolu))
+        raise HTTPException(409, f"s. {nolar} gece kuyruğunda (iş #{b[dolu[0]]}); iş bitene ya da iptal edilene kadar "
+                                 "elle işlenemez ve yeniden kuyruğa atılamaz.")
+
+
+def gece_ozet(g: dict) -> dict:
+    nolar = {r["id"]: r["no"] for r in sor("SELECT id, no FROM pages WHERE book_id=?", g["book_id"])}
+    kitap = sor("SELECT ad FROM books WHERE id=?", g["book_id"])
+    harcanan = sor("SELECT COALESCE(SUM(maliyet), 0) AS m FROM usage WHERE gece_id=?", g["id"])[0]["m"]
+    return {"id": g["id"], "book_id": g["book_id"], "kitap": kitap[0]["ad"] if kitap else "",
+            "sayfalar": sorted(nolar[p] for p in json_oku(g["sayfalar"], []) if p in nolar),
+            "page_ids": json_oku(g["sayfalar"], []), "asama": g["asama"], "durum": g["durum"],
+            "etiket": GECE_ETIKET[(g["durum"], g["asama"] if g["durum"] == "bekliyor" else None)],
+            "tahmin": g["tahmin"], "harcanan": harcanan, "hata": g["hata"], "hatalar": json_oku(g["hatalar"], []),
+            "uzak": len(json_oku(g["uzak"], [])), "olusturma": g["olusturma"], "guncelleme": g["guncelleme"],
+            "bitis": g["bitis"]}
+
+
+def gece_listesi(bid: Optional[int] = None, sinir: int = 50) -> list:
+    sart = "WHERE book_id=?" if bid is not None else ""
+    return [gece_ozet(g) for g in sor(f"SELECT * FROM gece {sart} ORDER BY id DESC LIMIT ?",
+                                      *([bid] if bid is not None else []), sinir)]
+
+
+def gece_sayfa_durumu(sayfalar: list, isler: list):
+    """Izgara için sayfa başına gece durumu: bekleyen işteyse aşaması; değilse sayfanın son işinde yanıtı başarısız
+    olduysa ya da iş tümden başarısızsa ve sayfa hâlâ bitmemişse hata iletisi."""
+    for s in sayfalar:
+        s["gece"] = None
+        for g in isler:  # en yeni önce
+            if s["id"] not in g["page_ids"]:
+                continue
+            if g["durum"] == "bekliyor":
+                s["gece"] = {"durum": g["asama"], "is": g["id"]}
+            else:
+                mesaj = [h["mesaj"] for h in g["hatalar"] if h["page_id"] == s["id"]] + (
+                    [g["hata"]] if g["durum"] == "hata" else [])
+                if mesaj and (not s["blok"] or s["cevrilmemis"]):
+                    s["gece"] = {"durum": "hata", "is": g["id"], "mesaj": " · ".join(mesaj)}
+            break
+
+
+def gece_guncelle(gid: int, **alan):
+    alan["guncelleme"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if alan.get("durum") in ("tamam", "hata", "iptal"):
+        alan["bitis"] = alan["guncelleme"]
+    for k in ("uzak", "hatalar"):
+        if k in alan:
+            alan[k] = json.dumps(alan[k], ensure_ascii=False)
+    yaz(f"UPDATE gece SET {', '.join(k + '=?' for k in alan)} WHERE id=?", *alan.values(), gid)
+
+
+def uzaklari_kapat(uzak: list):
+    """Gönderimi yarıda kalan işin gönderilmiş uzak işlerini iptal eder, yüklenen görüntüleri siler (en iyi çaba)."""
+    for u in uzak:
+        try:
+            llm_modul.batch_iptal(u["ad"])
+        except Exception:
+            pass
+        llm_modul.dosya_sil(u["dosyalar"])
+
+
+def gece_ocr_gonder(gid: int, bid: int, pidler: list) -> list:
+    """OCR'lanmamış sayfaların okuma istekleri (çift okuma açıksa ikinci okuma da); istek normal OCR'la aynı (görüntü +
+    OCR_PROMPT + şema). Model başına bir uzak iş."""
+    sayfalar = [s for s in sor(f"SELECT * FROM pages WHERE id IN ({','.join('?' * len(pidler))}) ORDER BY no", *pidler)
+                if not sor("SELECT 1 FROM passages WHERE page_id=? LIMIT 1", s["id"])]
+    adimlar = ["ocr", "ocr2"] if kitap_ayari(bid)["cift_okuma"] else ["ocr"]
+    uzak = []
+    try:
+        for adim in adimlar if sayfalar else []:
+            uzak.append(llm_modul.batch_gonder(adim, [(f"{adim}:{s['id']}", [VERI / "sayfa" / s["dosya"], OCR_PROMPT],
+                                                       OCR_AYAR) for s in sayfalar], ad=f"gece-{gid}-{adim}"))
+    except Exception:
+        uzaklari_kapat(uzak)
+        raise
+    return uzak
+
+
+def gece_ceviri_gonder(gid: int, pidler: list) -> list:
+    """Çevirisi boş, onaysız şerh/hâşiye pasajlarının çeviri istekleri; istek tek pasaj "Çevir"le aynı (ceviri_hazirla:
+    sözlük, yönerge, bellek, âyet kuralı, komşu sayfa bağlamı, katman modeli). Model başına bir uzak iş."""
+    pasajlar = sor(f"""SELECT p.* FROM passages p JOIN pages pg ON pg.id=p.page_id
+                       WHERE p.page_id IN ({','.join('?' * len(pidler))}) AND p.tur!='diger' AND TRIM(p.tr)=''
+                       AND p.durum!='onayli' ORDER BY pg.no, p.sira""", *pidler)
+    gruplar = {}
+    for p in pasajlar:
+        ek, model = ceviri_hazirla(p)
+        gruplar.setdefault(llm_modul.model_sec("ceviri", model), []).append(
+            (f"ceviri:{p['page_id']}:{p['id']}", ek + CEVIRI_PROMPT.format(metin=p["ar"]), {}))
+    uzak = []
+    try:
+        for n, (model, istekler) in enumerate(gruplar.items()):
+            uzak.append(llm_modul.batch_gonder("ceviri", istekler, model=model, ad=f"gece-{gid}-ceviri-{n + 1}"))
+    except Exception:
+        uzaklari_kapat(uzak)
+        raise
+    return uzak
+
+
+@app.post("/api/books/{bid}/batch")
+def gece_gonder(bid: int, secim: Secim):
+    """Seçilen sayfaları (en fazla 10) gece kuyruğuna atar: önce OCR'lanmamış sayfaların okuma işi, bitince çeviri işi
+    kendiliğinden gönderilir; OCR'lanacak sayfa yoksa doğrudan çeviri işi. Harekeleme yok. Yarı fiyatlı tahmin kalan
+    bütçeyi (bekleyen işlerin ayrılanı düşülmüş) aşarsa 429; kuyruktaki sayfa 409."""
+    k, nolar = secim_dogrula(bid, secim)
+    with tek_is():
+        secim_kuyrukta_degil(bid, nolar)
+        t = gece_tahmin(bid, nolar)
+        if not t["islenecek"]:
+            raise HTTPException(422, "Seçilen sayfaların hepsi zaten işlenmiş ve çevrilmiş")
+        if not t["yeter"]:
+            raise HTTPException(429, f"{t['islenecek']} sayfa ≈ ${t['tahmin']:.2f} (gece, yarı fiyat), kalan bütçe "
+                                     f"${t['kalan']:.2f}; kuyruğa atılmadı.")
+        butce_kontrol()
+        pidler = [s["id"] for s in sayfalari_hazirla(k, nolar)]
+        gid = yaz("INSERT INTO gece(book_id, sayfalar, tahmin) VALUES(?,?,?)", bid, json.dumps(pidler), t["tahmin"])
+        try:
+            uzak, asama = gece_ocr_gonder(gid, bid, pidler), "ocr"
+            if not uzak:
+                uzak, asama = gece_ceviri_gonder(gid, pidler), "ceviri"
+        except Exception as e:
+            yaz("DELETE FROM gece WHERE id=?", gid)
+            raise HTTPException(502, f"Gece kuyruğuna gönderilemedi: {type(e).__name__}: {str(e)[:300]}")
+        if not uzak:
+            yaz("DELETE FROM gece WHERE id=?", gid)
+            raise HTTPException(422, "Seçilen sayfalarda çevrilecek pasaj yok")
+        gece_guncelle(gid, asama=asama, uzak=uzak)
+    return gece_ozet(bul("gece", gid))
+
+
+def gece_ocr_kaydet(yanit: dict) -> list:
+    """OCR yanıtlarını normal OCR'la aynı yoldan (ocr_coz, ocr_kaydet: kutu doğrulama, çift okuma, talik bölme)
+    kaydeder. Sayfada bu arada pasaj oluşmuşsa üzerine yazılmaz. Başarısız yanıtlar hatalar listesine girer."""
+    hatalar = []
+    for anahtar, y in yanit.items():
+        adim, pid = anahtar.split(":")
+        s = sor("SELECT * FROM pages WHERE id=?", int(pid))
+        if adim != "ocr" or not s:
+            continue
+        s = s[0]
+        not_ = lambda m: hatalar.append({"page_id": s["id"], "no": s["no"], "passage_id": None, "mesaj": m})  # noqa
+        if "hata" in y:
+            not_(f"OCR: {y['hata']}")
+            continue
+        if sor("SELECT 1 FROM passages WHERE page_id=? LIMIT 1", s["id"]):
+            not_("sayfa bu arada okunmuş; gece OCR'ı üzerine yazılmadı")
+            continue
+        try:
+            bloklar = ocr_coz("ocr", y["metin"])
+        except HTTPException as e:
+            not_(f"OCR: {e.detail}")
+            continue
+        y2 = yanit.get(f"ocr2:{pid}")
+
+        def ikinci(y2=y2):
+            if "hata" in y2:
+                raise HTTPException(502, f"ocr2: {y2['hata']}")
+            return ocr_coz("ocr2", y2["metin"])
+
+        for u in ocr_kaydet(s, bloklar, ikinci if y2 else None):
+            not_(u)
+    return hatalar
+
+
+def gece_ceviri_kaydet(yanit: dict) -> list:
+    """Çevirileri pasaja yazar (sürüm nedeni "ceviri"); bu arada çevrilmiş ya da onaylanmış pasajın üzerine yazılmaz."""
+    hatalar = []
+    for anahtar, y in yanit.items():
+        _, pid, kid = anahtar.split(":")
+        p = sor("SELECT p.*, pg.no FROM passages p JOIN pages pg ON pg.id=p.page_id WHERE p.id=?", int(kid))
+        if not p:
+            continue
+        p = p[0]
+        if "hata" in y:
+            hatalar.append({"page_id": p["page_id"], "no": p["no"], "passage_id": p["id"],
+                            "mesaj": f"pasaj {p['sira'] + 1}: çeviri: {y['hata']}"})
+        elif not p["tr"].strip() and p["durum"] != "onayli":
+            p.pop("no")
+            pasaj_yaz(p, {"tr": y["metin"]}, "ceviri")
+    return hatalar
+
+
+def gece_denetle(g: dict):
+    """Bir işin uzak işlerini yoklar; aşamanın hepsi bittiyse yanıtların kullanımını yarı fiyatla deftere yazar (gece_id
+    ile), sonuçları kaydeder ve OCR aşamasından sonra çeviri işini gönderir. ISLEM_KILIDI tutularak çağrılır."""
+    uzak = json_oku(g["uzak"], [])
+    try:
+        durumlar = [llm_modul.batch_durum(u) for u in uzak]
+    except Exception as e:  # ağ/API hatası: iş bekler, sonraki yoklamada yeniden denenir
+        return gece_guncelle(g["id"], hata=f"yoklanamadı (yeniden denenecek): {type(e).__name__}: {str(e)[:200]}")
+    if any(d["durum"] == "bekliyor" for d in durumlar):
+        return gece_guncelle(g["id"], hata=None)
+    yanit, basarisiz = {}, []
+    for u, d in zip(uzak, durumlar):
+        llm_modul.dosya_sil(u["dosyalar"])
+        if d["durum"] == "hata":  # uzak işin tümü başarısız/süresi dolmuş: yanıtları hata sayılır
+            basarisiz.append(u["adim"])
+            yanit.update({a: {"hata": f"uzak iş başarısız ({d['hata']})"} for a in u["anahtarlar"]})
+        for anahtar, y in d["yanitlar"].items():
+            if y["kayit"]:
+                deftere_yaz(u["adim"], y["kayit"], int(anahtar.split(":")[1]), g["book_id"], g["id"])
+            yanit[anahtar] = y
+    ozet = " · ".join(f"{u['adim']}: {d['hata']}" for u, d in zip(uzak, durumlar) if d["durum"] == "hata")
+    hatalar = json_oku(g["hatalar"], [])
+    if g["asama"] == "ceviri":  # başarılı yanıtlar kaydedilir; bir model işi başarısızsa iş hata (sayfalar serbest)
+        hatalar += gece_ceviri_kaydet(yanit)
+        return gece_guncelle(g["id"], durum="hata" if ozet else "tamam", hata=ozet or None, hatalar=hatalar)
+    hatalar += gece_ocr_kaydet(yanit)  # yalnız ikinci okuma başarısızsa birincil okuma yine kaydedilir
+    if "ocr" in basarisiz:
+        return gece_guncelle(g["id"], durum="hata", hata=ozet, hatalar=hatalar)
+    pidler = json_oku(g["sayfalar"], [])
+    try:
+        butce_kontrol()
+        yeni = gece_ceviri_gonder(g["id"], pidler)
+    except Exception as e:
+        neden = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {str(e)[:300]}"
+        return gece_guncelle(g["id"], durum="hata", hatalar=hatalar,
+                             hata=f"OCR kaydedildi, çeviri gönderilemedi: {neden}")
+    if yeni:
+        return gece_guncelle(g["id"], asama="ceviri", uzak=yeni, hata=None, hatalar=hatalar)
+    gece_guncelle(g["id"], asama="ceviri", uzak=[], durum="tamam", hata=None, hatalar=hatalar)
+
+
+def gece_yokla():
+    """Bekleyen bütün işleri bir kez denetler (ISLEM_KILIDI tutularak)."""
+    for g in sor("SELECT * FROM gece WHERE durum='bekliyor' ORDER BY id"):
+        gece_denetle(g)
+
+
+def gece_yoklayici(dur: threading.Event, aralik: float):
+    """Arka plan döngüsü: başka bir sayfa işleniyorsa o tur atlanır."""
+    while not dur.wait(aralik):
+        if not ISLEM_KILIDI.acquire(blocking=False):
+            continue
+        try:
+            gece_yokla()
+        except Exception as e:  # döngü ölmesin; hata sonraki turda yeniden denenir
+            print(f"gece kuyruğu yoklanamadı: {type(e).__name__}: {e}", flush=True)
+        finally:
+            ISLEM_KILIDI.release()
+
+
+@app.get("/api/batches")
+def gece_isleri(kitap: Optional[int] = None):
+    """Gece kuyruğu işleri, en yenisi önce (en fazla 50); kitap verilirse yalnız o kitabın."""
+    if kitap is not None:
+        bul("books", kitap)
+    return gece_listesi(kitap)
+
+
+@app.post("/api/batches/check")
+def gece_simdi_denetle():
+    """"Şimdi denetle": bekleyen bütün işleri hemen yoklar; işlerin güncel listesini döndürür."""
+    with tek_is():
+        gece_yokla()
+    return gece_listesi()
+
+
+@app.post("/api/batches/{gid}/cancel")
+def gece_iptal(gid: int):
+    """Bekleyen işi ve uzak işlerini iptal eder; sayfalar elle işlenebilir hâle döner. Uzak iptal başarısızsa iş
+    bekler (502): sonuç yine gelebilir, "Şimdi denetle" ile alınır."""
+    bul("gece", gid)
+    with tek_is():
+        g = bul("gece", gid)  # ilk okumayla kilit arasında yoklayıcı işi bitirmiş olabilir
+        if g["durum"] != "bekliyor":
+            raise HTTPException(409, f"İş #{gid} zaten bitmiş ({GECE_ETIKET[(g['durum'], None)]})")
+        uzak = json_oku(g["uzak"], [])
+        for u in uzak:
+            try:
+                llm_modul.batch_iptal(u["ad"])
+            except Exception as e:
+                raise HTTPException(502, f"Uzak iş ({u['ad']}) iptal edilemedi: {type(e).__name__}: {str(e)[:200]}; "
+                                         "iş bekliyor, 'Şimdi denetle' ile sonucu alınabilir.")
+        for u in uzak:
+            llm_modul.dosya_sil(u["dosyalar"])
+        gece_guncelle(gid, durum="iptal", hata=None)
+    return gece_ozet(bul("gece", gid))

@@ -24,6 +24,7 @@ if [ -z "$PY" ]; then dnf install -y python3.11 && PY=python3.11; fi
 id arapca >/dev/null 2>&1 || useradd --system --home-dir "$HEDEF" --shell /sbin/nologin arapca
 mkdir -p "$HEDEF/data"
 cp "$KAYNAK"/{app.py,llm.py,arapca_test.py,yedek.py,index.html,requirements.txt} "$HEDEF/"
+cp "$KAYNAK/deploy/hareke_yerel.py" "$HEDEF/"  # isteğe bağlı yerel harekeleme (kurulumu dosyanın başında)
 [ -x "$HEDEF/venv/bin/pip" ] || "$PY" -m venv "$HEDEF/venv"
 "$HEDEF/venv/bin/pip" install -q --upgrade pip -r "$HEDEF/requirements.txt"
 chown -R arapca:arapca "$HEDEF"

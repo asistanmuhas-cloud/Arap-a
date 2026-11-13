@@ -111,15 +111,26 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
 .fark.ar { font-size:19px; line-height:1.8; }
 .fark del, del.fark { color:var(--kirmizi); background:#fbe3df; } .fark ins, ins.fark { color:var(--yesil); background:#e2f1e3; text-decoration:none; }
 /* çıktı seçenekleri */
-#cikti { position:fixed; z-index:15; width:min(360px, calc(100vw - 32px)); background:var(--kagit); border:1px solid var(--cizgi);
-         border-radius:6px; box-shadow:0 8px 24px #0003; padding:12px 14px; font-size:14px; }
+.acilir { position:fixed; z-index:15; width:min(360px, calc(100vw - 32px)); background:var(--kagit); border:1px solid var(--cizgi);
+          border-radius:6px; box-shadow:0 8px 24px #0003; padding:12px 14px; font-size:14px; }
+.acilir p { margin:8px 0 0; }
 #cikti fieldset { border:0; border-top:1px solid var(--cizgi); margin:8px 0 0; padding:6px 0 0; }
 #cikti legend { color:var(--soluk); font-size:12px; padding:0 4px 0 0; }
 #cikti label { display:flex; gap:6px; align-items:baseline; margin:3px 0; cursor:pointer; }
 #cikti label.yan { display:inline-flex; margin-inline-end:12px; }
 #cikti input[type=number] { width:80px; border:1px solid var(--cizgi); border-radius:4px; padding:2px 6px; background:#fff; }
-#cikti .dugmeler { display:flex; gap:8px; justify-content:flex-end; margin-top:10px; }
-#cikti .hata { color:var(--kirmizi); font-size:13px; margin:6px 0 0; }
+.acilir .dugmeler { display:flex; gap:8px; justify-content:flex-end; margin-top:10px; }
+.acilir .hata { color:var(--kirmizi); font-size:13px; margin:6px 0 0; }
+/* gece kuyruğu */
+.gece { margin:0 0 14px; }
+.gece .baslik { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+.gece h3 { font-size:15px; font-weight:normal; margin:0; }
+.gece td.durum { min-width:0; }
+.gece .rozet { margin:0; }
+.gece .ayrinti { font-size:12px; margin-top:3px; overflow-wrap:anywhere; }
+.gece details { font-size:12px; margin-top:3px; } .gece details li { overflow-wrap:anywhere; }
+.gece details ul { margin:4px 0 0; padding-inline-start:18px; }
+#yan .ayar select { display:block; max-width:100%; margin-top:6px; border:1px solid var(--cizgi); background:#fff; border-radius:4px; padding:3px 6px; }
 #yedekSatir { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:-4px 0 12px; font-size:13px; }
 #yan { position:fixed; top:var(--ust, 0); right:0; bottom:0; width:min(420px, 100vw); background:var(--kagit); border-left:1px solid var(--cizgi);
        padding:14px; overflow:auto; z-index:10; display:none; box-shadow:-6px 0 20px #0002; }  /* üst çubuğun altında: düğmeleri örtmez */
@@ -174,7 +185,7 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
   header .grup { order:2; flex-basis:100%; }
   #araForm { flex:1; min-width:120px; } #araKutu { width:100%; }
   .matnSatir { grid-template-columns:1fr; } .matnSatir > div.h + div.h { border-inline-start:0; border-top:1px dashed var(--cizgi); }
-  .arsiv .gizle { display:none; } .arsiv td.islem { white-space:normal; } .arsiv td.islem button { margin:2px 0 2px 4px; }
+  .arsiv .gizle, .gece .gizle { display:none; } .arsiv td.islem { white-space:normal; } .arsiv td.islem button { margin:2px 0 2px 4px; }
   #izgara { grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); }
 }
 </style>
@@ -189,6 +200,7 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
     <span id="sayfaSayisi" class="ipucu"></span>
     <span id="seciliSayisi" class="ipucu izgaraOzel"></span>
     <button id="cevirDugme" class="ana izgaraOzel">Seçilenleri çevir</button>
+    <button id="geceDugme" class="izgaraOzel" title="Seçilen sayfaları Gemini Batch API ile yarı fiyata işler; sonuç birkaç saat içinde gelir">Gece kuyruğuna at</button>
     <button id="ayarDugme" title="Bu kitabın ayarları">Ayarlar</button>
     <button class="kuyrukDugme" title="Şüpheli kelime kuyruğu">Şüpheli<span class="sayac" hidden></span></button>
     <button class="isaretDugme" title="&quot;Tekrar bak&quot; işaretli pasajlar">İşaretliler<span class="sayac" hidden></span></button>
@@ -218,9 +230,11 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
   <h2>Arşiv</h2>
   <div id="yedekSatir"></div>
   <div id="kitaplar"></div>
+  <div id="geceArsiv" class="gece" style="margin-top:18px"></div>
 </section>
 <section id="kitap" class="gorunum" hidden>
   <p class="ipucu">Çevrilecek sayfaları işaretle (tek seferde en fazla 10). İşlenmiş sayfanın resmine tıklayınca düzenleme açılır.</p>
+  <div id="geceKitap" class="gece"></div>
   <div id="izgara"></div>
 </section>
 <section id="matn" class="gorunum" hidden>
@@ -249,6 +263,7 @@ const AZAMI_SECIM = 10;
 let kitap = null, sayfa = null, hedef = null;  // hedef: sayfa açılınca gidilecek pasaj {id, secim, alan}
 const secili = new Set(), isDurumu = {};  // isDurumu[no] = {tur: 'isleniyor'|'hata', mesaj}
 let topluCalisiyor = false;
+let sunucu = { modeller: [], ceviri_modeli: '', hareke: { motor: 'gemini', model: '' }, batch_orani: .5, gece_aralik: 300 };  // GET /api/config
 
 function bildir(mesaj, hata) {
   const d = $('#durum');
@@ -316,6 +331,7 @@ async function harcamaYukle() {
   try {
     const h = await (await fetch('/api/usage')).json(), e = $('#harcama');
     e.textContent = `Bugün ${usd(h.bugun)} / ${usd(h.gunluk_sinir)} · Bu ay ${usd(h.bu_ay)} / ${usd(h.aylik_sinir)}`;
+    e.title = 'Tahmini API harcaması / bütçe sınırı' + (h.rezerv > 0 ? ` · bekleyen gece işleri için ayrılan ${usd(h.rezerv)} (yeni işlerde kalan bütçeden düşülür)` : '');
     const oran = Math.max(h.bugun / h.gunluk_sinir, h.bu_ay / h.aylik_sinir);
     e.className = oran >= 1 ? 'kirmizi' : oran >= .8 ? 'sari' : 'ipucu';
   } catch {}
@@ -344,6 +360,7 @@ async function arsivAc() {
   const liste = await api('/api/books');
   gorunum('arsiv'); document.title = 'Arşiv · Çeviri çalışma alanı';
   yedekSatiri();
+  api('/api/batches').then(isler => geceCiz($('#geceArsiv'), isler, true)).catch(() => {});
   if (!liste.length) {
     return $('#kitaplar').replaceChildren(el('p', { className: 'ipucu', textContent: 'Henüz kitap yok. Başlamak için PDF ya da sayfa görüntüleri yükle.' }));
   }
@@ -382,12 +399,22 @@ async function yedekSatiri() {
     textContent: !d ? '' : d.son ? 'Son gecelik yedek: ' + new Date(d.son + 'T12:00').toLocaleDateString('tr-TR', { dateStyle: 'medium' }) : 'Gecelik yedek: henüz yedek yok' }));
 }
 // ---- DOCX çıktı seçenekleri (sayfa içi küçük panel) ----
-function ciktiKapat() { $('#cikti')?.remove(); document.removeEventListener('mousedown', ciktiDisari); document.removeEventListener('keydown', ciktiEsc); }
-function ciktiDisari(e) { if (!e.target.closest('#cikti, .ciktiAcan')) ciktiKapat(); }
-function ciktiEsc(e) { if (e.key === 'Escape') ciktiKapat(); }
+// açılır küçük paneller (DOCX seçenekleri, gece kuyruğu onayı): biri açıkken öbürü kapanır; dışarı tıklama / Esc kapatır
+function acilirKapat() { document.querySelector('.acilir')?.remove(); document.removeEventListener('mousedown', acilirDisari); document.removeEventListener('keydown', acilirEsc); }
+function acilirDisari(e) { if (!e.target.closest('.acilir, .ciktiAcan')) acilirKapat(); }
+function acilirEsc(e) { if (e.key === 'Escape') acilirKapat(); }
+function acilirAc(panel, dugme) {
+  dugme.classList.add('ciktiAcan');
+  document.body.append(panel);
+  const r = dugme.getBoundingClientRect();
+  panel.style.top = Math.max(8, Math.min(r.bottom + 6, innerHeight - panel.offsetHeight - 8)) + 'px';
+  panel.style.left = Math.max(16, Math.min(r.right - panel.offsetWidth, innerWidth - panel.offsetWidth - 16)) + 'px';
+  setTimeout(() => { document.addEventListener('mousedown', acilirDisari); document.addEventListener('keydown', acilirEsc); });
+}
+const ciktiKapat = acilirKapat;
 function ciktiPaneli(k, dugme) {  // k: {id, ad, sayfa_sayisi}
   if ($('#cikti')) { const acik = $('#cikti').dataset.kitap; ciktiKapat(); if (acik == k.id) return; }
-  dugme.classList.add('ciktiAcan');
+  acilirKapat();
   const radyo = (deger, yazi, ipucu) => el('label', { title: ipucu || '' },
     el('input', { type: 'radio', name: 'duzen', value: deger, checked: deger === 'karsilikli' }), yazi);
   const kutu = (yazi, secili, sinif = '') => { const i = el('input', { type: 'checkbox', checked: secili }); return [i, el('label', { className: sinif }, i, yazi)]; };
@@ -397,7 +424,7 @@ function ciktiPaneli(k, dugme) {  // k: {id, ad, sayfa_sayisi}
   const sayi = yer => el('input', { type: 'number', min: 1, max: k.sayfa_sayisi || '', placeholder: yer, inputMode: 'numeric' });
   const bas = sayi('baş'), son = sayi('son'), hata = el('p', { className: 'hata', hidden: true });
   const indirD = el('button', { textContent: 'İndir', className: 'ana' }), vazgec = el('button', { textContent: 'Vazgeç', type: 'button' });
-  const panel = el('div', { id: 'cikti', role: 'dialog', ariaLabel: 'DOCX çıktı seçenekleri' },
+  const panel = el('div', { id: 'cikti', className: 'acilir', role: 'dialog', ariaLabel: 'DOCX çıktı seçenekleri' },
     el('b', { textContent: `DOCX · ${k.ad}` }),
     el('fieldset', {}, el('legend', { textContent: 'Düzen' }),
       radyo('karsilikli', 'Karşılıklı iki sütun (Türkçe | Arapça)'), radyo('turkce', 'Yalnız Türkçe'),
@@ -426,11 +453,7 @@ function ciktiPaneli(k, dugme) {  // k: {id, ad, sayfa_sayisi}
       catch (e) { goster(e.message); throw e; }
     });
   };
-  document.body.append(panel);
-  const r = dugme.getBoundingClientRect();
-  panel.style.top = Math.min(r.bottom + 6, innerHeight - panel.offsetHeight - 8) + 'px';
-  panel.style.left = Math.max(16, Math.min(r.right - panel.offsetWidth, innerWidth - panel.offsetWidth - 16)) + 'px';
-  setTimeout(() => { document.addEventListener('mousedown', ciktiDisari); document.addEventListener('keydown', ciktiEsc); });
+  acilirAc(panel, dugme);
   panel.querySelector('input:checked').focus();
 }
 
@@ -441,6 +464,8 @@ async function kitapAc(id) {
   if (yeni && !topluCalisiyor) { secili.clear(); for (const n in isDurumu) delete isDurumu[n]; }
   gorunum('kitap'); document.title = kitap.ad + ' · Çeviri çalışma alanı';
   kitapBasligi(false);
+  const isler = kitap.gece.filter((g, i) => g.durum === 'bekliyor' || i < 3);  // bekleyenler ve son üç iş
+  geceCiz($('#geceKitap'), isler, false);
   $('#izgara').replaceChildren(...kitap.sayfalar.map(kucukDugum));
   if (!kitap.sayfalar.length) $('#izgara').append(el('p', { className: 'ipucu', textContent: 'Bu kitapta sayfa kalmadı.' }));
   seciliGoster();
@@ -489,8 +514,12 @@ function kucukDugum(s) {
     if (islendi) location.hash = `#/kitap/${kitap.id}/sayfa/${s.id}`;
     else { kutu.checked = !kutu.checked; sec(s.no, kutu); }
   };
+  const gece = s.gece;
   const rozet = is?.tur === 'isleniyor' ? el('span', { className: 'rozet isleniyor', textContent: is.mesaj || 'işleniyor…' })
     : is?.tur === 'hata' ? el('span', { className: 'rozet hata', textContent: 'hata' })
+    : gece && gece.durum !== 'hata' ? el('span', { className: 'rozet isleniyor', textContent: gece.durum === 'ocr' ? 'gece: OCR' : 'gece: çeviri',
+        title: `Gece kuyruğunda (iş #${gece.is}); iş bitene ya da iptal edilene kadar elle işlenemez` })
+    : gece ? el('span', { className: 'rozet hata', textContent: 'gece hatası', title: `İş #${gece.is}` })
     : onayli ? el('span', { className: 'rozet onayli', textContent: '✓ onaylı' })
     : islendi ? el('span', { className: 'rozet islendi', textContent: s.pasaj ? `işlendi ${s.onayli}/${s.pasaj}` : 'işlendi' })
     : null;
@@ -498,7 +527,8 @@ function kucukDugum(s) {
   const isaret = s.isaretli ? el('span', { className: 'rozet isaret', textContent: '⚑ ' + s.isaretli, title: `${s.isaretli} pasaj "tekrar bak" işaretli` }) : null;
   return el('figure', { id: 'k' + s.no, className: sinif }, img,
     isaret, el('figcaption', {}, el('label', {}, kutu, `s. ${s.no}`), rozet),
-    is?.tur === 'hata' ? el('div', { className: 'hataMetni', textContent: is.mesaj }) : null);
+    is?.tur === 'hata' ? el('div', { className: 'hataMetni', textContent: is.mesaj })
+      : !is && gece?.durum === 'hata' ? el('div', { className: 'hataMetni', textContent: gece.mesaj }) : null);
 }
 function kucukYenile(no) {
   const s = kitap.sayfalar.find(x => x.no === no), eski = document.getElementById('k' + no);
@@ -516,13 +546,21 @@ function sec(no, kutu) {
 function seciliGoster() {
   $('#seciliSayisi').textContent = `${secili.size}/${AZAMI_SECIM} seçili`;
   $('#cevirDugme').disabled = topluCalisiyor || !secili.size;
+  $('#geceDugme').disabled = topluCalisiyor || !secili.size;
   $('#temizleDugme').disabled = topluCalisiyor || !secili.size;
 }
 $('#temizleDugme').onclick = () => { secili.clear(); kitapAc(kitap.id); };
 $('#docxDugme').onclick = () => kitap.sayfalar.some(s => s.pasaj) ? ciktiPaneli(kitap, $('#docxDugme')) : bildir('Dışa aktarılacak pasaj yok', true);
 
+// gece kuyruğundaki sayfa elle işlenmez / yeniden kuyruğa atılmaz (sunucu da 409 ile reddeder)
+function kuyruktaVar(nolar) {
+  const dolu = nolar.filter(n => ['ocr', 'ceviri'].includes(kitap.sayfalar.find(s => s.no === n)?.gece?.durum));
+  if (dolu.length) bildir(`s. ${dolu.join(', ')} gece kuyruğunda; iş bitene ya da iptal edilene kadar elle işlenemez ve yeniden kuyruğa atılamaz.`, true);
+  return dolu.length > 0;
+}
 $('#cevirDugme').onclick = async () => {
   const kid = kitap.id, nolar = [...secili].sort((a, b) => a - b);
+  if (kuyruktaVar(nolar)) return;
   let t;
   try { t = await api(`/api/books/${kid}/estimate`, 'POST', { sayfalar: nolar }); } catch { return; }
   if (!t.islenecek) return bildir('Seçilen sayfaların hepsi zaten işlenmiş ve çevrilmiş');
@@ -568,6 +606,75 @@ $('#cevirDugme').onclick = async () => {
   } catch (e) { durum.textContent = ''; console.warn(e); }
   finally { topluCalisiyor = false; if (kitap?.id === kid && !$('#kitap').hidden) await kitapAc(kid); else seciliGoster(); }
 };
+
+// ---- gece kuyruğu (Gemini Batch API, yarı fiyat): onay paneli, iş listesi, "Şimdi denetle", iptal ----
+$('#geceDugme').onclick = async () => {
+  const kid = kitap.id, nolar = [...secili].sort((a, b) => a - b), dugme = $('#geceDugme');
+  if ($('#gecePanel')) return acilirKapat();
+  if (kuyruktaVar(nolar)) return;
+  let t;
+  try { t = await api(`/api/books/${kid}/estimate?gece=true`, 'POST', { sayfalar: nolar }); } catch { return; }
+  if (!t.islenecek) return bildir('Seçilen sayfaların hepsi zaten işlenmiş ve çevrilmiş');
+  acilirKapat();
+  const gonder = el('button', { textContent: 'Kuyruğa at', className: 'ana', disabled: !t.yeter }), vazgec = el('button', { textContent: 'Vazgeç', type: 'button' });
+  const hata = el('p', { className: 'hata', hidden: t.yeter, textContent: 'Tahmin kalan bütçeyi aşıyor; kuyruğa atılamaz.' });
+  const dk = Math.round(sunucu.gece_aralik / 60);
+  const panel = el('div', { id: 'gecePanel', className: 'acilir', role: 'dialog', ariaLabel: 'Gece kuyruğu onayı' },
+    el('b', { textContent: `Gece kuyruğu · ${nolar.length} sayfa (s. ${nolar.join(', ')})` }),
+    el('p', {}, `${t.islenecek} sayfa ≈ `, el('b', { textContent: usd(t.tahmin) }),
+      ` (yarı fiyat; normal yoldan ${usd(t.normal_tahmin)}` + (t.cift_okuma ? `, çift okuma dahil` : '') + ')'),
+    el('p', { className: 'ipucu', textContent: `Kalan bütçe ${usd(t.kalan)}` + (t.ortalama_defterden ? ' · tahmin geçmiş ortalamadan' : ' · tahmin varsayılan sayfa maliyetinden') }),
+    el('p', { className: 'ipucu', textContent: 'Sonuç birkaç saat içinde gelir (en geç 24 saat). Önce OCR yapılır, bitince çeviri kendiliğinden gönderilir; harekeleme yapılmaz. '
+      + (dk > 0 ? `Sunucu açıkken ${dk} dakikada bir denetlenir; ` : '') + '"Şimdi denetle" ile hemen bakılabilir. İş bitene kadar bu sayfalar elle işlenemez.' }),
+    hata, el('div', { className: 'dugmeler' }, vazgec, gonder));
+  vazgec.onclick = acilirKapat;
+  gonder.onclick = () => mesgul(gonder, async () => {
+    try {
+      const g = await api(`/api/books/${kid}/batch`, 'POST', { sayfalar: nolar }, true);
+      acilirKapat(); for (const n of nolar) secili.delete(n);
+      bildir(`İş #${g.id} gece kuyruğuna atıldı (${g.etiket})`);
+      if (kitap?.id === kid && !$('#kitap').hidden) await kitapAc(kid);
+    } catch (e) { hata.textContent = e.message; hata.hidden = false; throw e; }
+  });
+  acilirAc(panel, dugme);
+  gonder.focus();
+};
+const GECE_ROZET = { bekliyor: 'isleniyor', tamam: 'onayli', hata: 'hata', iptal: '' };
+function geceCiz(kutu, isler, arsivde) {  // iş listesi: kitap ekranında o kitabın, arşivde bütün işler
+  if (!isler.length) return kutu.replaceChildren();
+  const bekleyen = isler.filter(g => g.durum === 'bekliyor').length;
+  const denetle = el('button', { textContent: 'Şimdi denetle', title: 'Bekleyen işlerin durumunu Gemini\'den hemen sor; biten aşamanın sonuçları kaydedilir', disabled: !bekleyen });
+  denetle.onclick = () => mesgul(denetle, async () => {
+    bildir('Gece kuyruğu denetleniyor…');
+    const liste = await api('/api/batches/check', 'POST');
+    const kalan = liste.filter(g => g.durum === 'bekliyor').length;
+    bildir(kalan ? `${kalan} iş hâlâ bekliyor` : 'Bekleyen iş kalmadı');
+    await yonlendir();
+  });
+  const th = (yazi, sinif = '') => el('th', { textContent: yazi, className: sinif });
+  const satirlar = isler.map(g => {
+    const iptal = g.durum === 'bekliyor' ? el('button', { textContent: 'İptal', title: 'İşi ve Gemini\'deki uzak işi iptal et; sayfalar elle işlenebilir hâle döner' }) : null;
+    if (iptal) iptal.onclick = () => confirm(`İş #${g.id} (s. ${g.sayfalar.join(', ')}) iptal edilsin mi? Biten aşamanın kaydedilmiş sonuçları kalır.`)
+      && mesgul(iptal, async () => { await api(`/api/batches/${g.id}/cancel`, 'POST'); bildir(`İş #${g.id} iptal edildi`); await yonlendir(); });
+    const ayrinti = [];
+    if (g.hata) ayrinti.push(el('div', { className: 'ayrinti ' + (g.durum === 'hata' ? 'kirmizi' : 'sari'), textContent: g.hata }));
+    if (g.hatalar.length) ayrinti.push(el('details', {}, el('summary', { textContent: `${g.hatalar.length} sayfa/pasaj uyarısı` }),
+      el('ul', {}, ...g.hatalar.map(h => el('li', { textContent: `s. ${h.no}: ${h.mesaj}` })))));
+    const zaman = g.bitis || g.guncelleme || g.olusturma;
+    return el('tr', {},
+      el('td', { className: 'sayi', textContent: '#' + g.id }),
+      arsivde ? el('td', {}, el('a', { href: `#/kitap/${g.book_id}`, textContent: g.kitap })) : null,
+      el('td', { textContent: 's. ' + g.sayfalar.join(', ') }),
+      el('td', { className: 'durum' }, el('span', { className: 'rozet ' + GECE_ROZET[g.durum], textContent: g.etiket }), ...ayrinti),
+      el('td', { className: 'sayi', title: 'Harcanan (yarı fiyat) / gönderimdeki tahmin', textContent: `${usd(g.harcanan)} / ${usd(g.tahmin)}` }),
+      el('td', { className: 'sayi gizle', title: g.bitis ? 'Bitiş' : 'Son denetleme', textContent: tarih(zaman) }),
+      el('td', { className: 'islem' }, iptal));
+  });
+  kutu.replaceChildren(el('div', { className: 'baslik' }, el('h3', { textContent: 'Gece kuyruğu' }),
+      el('span', { className: 'ipucu', textContent: bekleyen ? `${bekleyen} iş bekliyor · yarı fiyat` : 'bekleyen iş yok' }), denetle),
+    el('table', { className: 'arsiv' }, el('thead', {}, el('tr', {}, th('İş', 'sayi'), arsivde ? th('Kitap') : null, th('Sayfalar'), th('Durum'),
+      th('Harcanan / tahmin', 'sayi'), th('Zaman', 'sayi gizle'), th(''))), el('tbody', {}, ...satirlar)));
+}
 
 // ---- düzenleme ----
 async function duzenAc(kid, sid) {
@@ -677,6 +784,9 @@ async function kaydet(p, alan) {
   const yeni = await api('/api/passages/' + p.id, 'PATCH', alan);
   return degistir(yeni);
 }
+const harekeIpucu = () => sunucu.hareke.motor === 'yerel'
+  ? 'Harekeleme motoru: yerel model (sunucuda HAREKE_KOMUT). API maliyeti yok, bütçeden düşmez; rasm kontrolü yine uygulanır.'
+  : `Harekeleme motoru: Gemini (${sunucu.hareke.model}). Sayfanın en pahalı adımı; bütçeden düşer.`;
 function pasajDugumu(p) {
   const tur = el('select', {}, ...['serh', 'hasiye', 'diger'].map(t => el('option', { value: t, textContent: { serh: 'Şerh', hasiye: 'Hâşiye', diger: 'Diğer' }[t] })));
   tur.value = p.tur; tur.onchange = () => kaydet(p, { tur: tur.value }).then(() => ozetYukle());
@@ -766,8 +876,8 @@ function pasajDugumu(p) {
   const bolum = el('section', { id: 'p' + p.id, className: `pasaj ${p.tur} ${p.durum}` + (p.isaretli ? ' isaretli' : '') },
     el('div', { className: 'ust' }, tur, ...(lemma || []), el('span', { className: 'bos' }),
       isaretD, p.notu ? null : notD, gecmisD,
-      metin ? dugme('Çevir', 'translate', 'Çevriliyor…') : null,
-      metin ? dugme(p.ar_vocalized ? 'Yeniden harekele' : 'Harekele', 'vocalize', 'Harekeleniyor…') : null,
+      metin ? Object.assign(dugme('Çevir', 'translate', 'Çevriliyor…'), { title: `Çeviri modeli: ${kitap.ayar['model_' + p.tur] || sunucu.ceviri_modeli}` }) : null,
+      metin ? Object.assign(dugme(p.ar_vocalized ? 'Yeniden harekele' : 'Harekele', 'vocalize', 'Harekeleniyor…'), { title: harekeIpucu() }) : null,
       metin ? agentD : null, metin ? onayD : null, notGir),
     arHucre, trHucre, etiketler);
   bolum.addEventListener('focusin', () => vurgula(p));
@@ -811,9 +921,33 @@ const AYAR_TANIM = [
     aciklama: 'Çeviri isteğine onaylı pasajlardan en benzer üç tanesi (önce bu kitaptan) üslup ve terim örneği olarak eklenir. Benzer onaylı pasaj yoksa bir şey eklenmez. Varsayılan olarak açık.' },
   { ad: 'ayet_isaret', baslik: 'Âyet ve hadis işaretleme',
     aciklama: 'Âyet meali *italik* yazılıp ardından [Sûre 5/6] biçiminde kaynak verilir; hadis "tırnak" içinde ve [hadis] etiketiyle. Her âyet etiketi doğrulanmak üzere şüpheli kuyruğuna düşer. Çeviri isteğini biraz uzatır.' },
+  // secim: 'model' — değer sunucunun fiyat tablosundaki bir model ya da varsayılan (null)
+  { ad: 'model_serh', baslik: 'Şerh çeviri modeli', secim: 'model',
+    aciklama: 'Şerh pasajları bu modelle çevrilir (tek pasaj "Çevir", toplu iş ve gece kuyruğu). Ucuz model maliyeti düşürür ama terim ve matn ayrımında daha çok düzeltme gerektirebilir.' },
+  { ad: 'model_hasiye', baslik: 'Hâşiye çeviri modeli', secim: 'model',
+    aciklama: 'Hâşiye (talik) pasajları bu modelle çevrilir. Hâşiye genelde şerhten uzun olduğu için burada ucuz model seçmek tasarrufu büyütür.' },
 ];
+const fiyatMetni = ad => {
+  const m = sunucu.modeller.find(x => x.ad === ad);
+  return m ? `1M token: girdi $${m.girdi.toFixed(2)} · çıktı $${m.cikti.toFixed(2)} (düşünme dahil; gece kuyruğunda yarısı)` : 'Fiyat tablosunda yok: en pahalı fiyat varsayılır';
+};
+function modelAyari(t) {  // seçmeli ayar: model listesi sunucunun fiyat tablosundan (GET /api/config)
+  const sec = el('select', {}, el('option', { value: '', textContent: `Varsayılan (${sunucu.ceviri_modeli})` }),
+    ...sunucu.modeller.map(m => el('option', { value: m.ad, textContent: m.ad })));
+  sec.value = kitap.ayar[t.ad] || '';
+  const fiyat = el('small', { className: 'ipucu' }), yaz = () => fiyat.textContent = fiyatMetni(sec.value || sunucu.ceviri_modeli);
+  sec.onchange = async () => {
+    sec.disabled = true;
+    try { kitap.ayar = (await api('/api/books/' + kitap.id, 'PATCH', { ayar: { [t.ad]: sec.value || null } })).ayar; bildir('Ayar kaydedildi'); }
+    catch { sec.value = kitap.ayar[t.ad] || ''; } finally { sec.disabled = false; yaz(); }
+  };
+  yaz();
+  return el('div', { className: 'ayar', style: 'cursor:auto' }, el('span', { style: 'min-width:0' }, el('b', { textContent: t.baslik }),
+    el('small', { className: 'ipucu', textContent: t.aciklama }), sec, fiyat));
+}
 $('#ayarDugme').onclick = () => {
   const satirlar = AYAR_TANIM.map(t => {
+    if (t.secim === 'model') return modelAyari(t);
     const kutu = el('input', { type: 'checkbox', checked: !!kitap.ayar[t.ad] });
     kutu.onchange = async () => {
       kutu.disabled = true;
@@ -833,7 +967,7 @@ $('#ayarDugme').onclick = () => {
     yonerge.value = kitap.yonerge; bildir(kitap.yonerge ? 'Yönerge kaydedildi' : 'Yönerge kaldırıldı');
   }).then(say);
   say();
-  yanAc('Kitap ayarları', el('p', { className: 'ipucu', textContent: `"${kitap.ad}" için geçerlidir; çeviri belleği dışındakiler varsayılan olarak kapalıdır.` }), ...satirlar,
+  yanAc('Kitap ayarları', el('p', { className: 'ipucu', textContent: `"${kitap.ad}" için geçerlidir; açık/kapalı ayarlardan çeviri belleği dışındakiler varsayılan olarak kapalıdır, çeviri modelleri varsayılan olarak sunucununkidir.` }), ...satirlar,
     el('div', { className: 'ayar', style: 'display:block; cursor:auto' }, el('b', { textContent: 'Üslup yönergesi' }),
       el('small', { className: 'ipucu', textContent: 'Transliterasyon kuralı, dua cümlelerinin yazımı, eser/müellif adlarının biçimi gibi. Boş değilse her çeviri ve "Öneri" isteğine eklenir.' }),
       yonerge, el('div', { className: 'satirSon' }, kaydetD, el('span', { className: 'bos' }), sayac)));
@@ -999,7 +1133,7 @@ $('#sozlukDugme').onclick = async () => {
   doldur(await api('/api/glossary'));
 };
 harcamaYukle();
-yonlendir();
+fetch('/api/config').then(y => y.json()).then(j => { sunucu = j; }).catch(() => {}).finally(yonlendir);
 </script>
 </body>
 </html>
