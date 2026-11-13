@@ -31,7 +31,7 @@ chown -R arapca:arapca "$HEDEF"
 if [ ! -s /etc/arapca.env ]; then
   read -rsp "GEMINI_API_KEY: " ANAHTAR; echo
   [ -n "$ANAHTAR" ] || { echo "anahtar boş olamaz"; exit 1; }
-  (umask 077; printf 'GEMINI_API_KEY=%s\nMODEL_OCR=gemini-3.1-pro-preview\n' "$ANAHTAR" > /etc/arapca.env)
+  (umask 077; printf 'GEMINI_API_KEY=%s\nMODEL_OCR=gemini-3.1-pro-preview\nGUNLUK_BUTCE_USD=3\nAYLIK_BUTCE_USD=30\n' "$ANAHTAR" > /etc/arapca.env)
 fi
 
 cat > /etc/systemd/system/arapca.service <<EOF
