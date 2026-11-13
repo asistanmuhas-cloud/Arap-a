@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Çeviri çalışma alanı</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root { --zemin:#f6f4ef; --kagit:#fffdf8; --cizgi:#ddd6c8; --yazi:#26221c; --soluk:#7a7265;
+        --vurgu:#7a3b12; --yesil:#2f6b3a; --sari:#9a6b00; --kirmizi:#a32a1c; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--zemin); color:var(--yazi); font:15px/1.5 Georgia, "Times New Roman", serif; }
+button, select, input, textarea { font:inherit; color:inherit; }
+button { background:var(--kagit); border:1px solid var(--cizgi); border-radius:4px; padding:3px 10px; cursor:pointer; }
+button:hover:not(:disabled) { border-color:var(--vurgu); color:var(--vurgu); }
+button:disabled { opacity:.5; cursor:wait; }
+button.ana { background:var(--vurgu); color:#fff; border-color:var(--vurgu); }
+button.ana:hover:not(:disabled) { color:#fff; filter:brightness(1.15); }
+header { position:sticky; top:0; z-index:5; background:var(--kagit); border-bottom:1px solid var(--cizgi);
+         display:flex; gap:10px; align-items:center; padding:8px 14px; flex-wrap:wrap; }
+header h1 { font-size:16px; margin:0 8px 0 0; font-weight:normal; letter-spacing:.02em; }
+#ilerleme { flex:1; min-width:140px; display:flex; align-items:center; gap:8px; color:var(--soluk); font-size:13px; }
+#cubuk { flex:1; height:6px; background:var(--cizgi); border-radius:3px; overflow:hidden; }
+#cubuk i { display:block; height:100%; width:0; background:var(--yesil); transition:width .3s; }
+main { display:grid; grid-template-columns:minmax(260px, 30%) 1fr; gap:14px; padding:14px; align-items:start; }
+#goruntu { position:sticky; top:62px; max-height:calc(100vh - 76px); overflow:auto; border:1px solid var(--cizgi); background:#fff; }
+#goruntu img { width:100%; display:block; cursor:zoom-in; }
+#goruntu.buyuk img { width:200%; cursor:zoom-out; }
+#arac { display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
+.pasaj { display:grid; grid-template-columns:1fr 1fr; gap:0; background:var(--kagit); border:1px solid var(--cizgi);
+         border-inline-start:4px solid var(--cizgi); margin-bottom:10px; }
+.pasaj.onayli { border-inline-start-color:var(--yesil); }
+.pasaj.diger { opacity:.6; }
+.pasaj > .ust { grid-column:1/-1; display:flex; gap:6px; align-items:center; padding:5px 8px;
+                border-bottom:1px solid var(--cizgi); font-size:13px; flex-wrap:wrap; }
+.pasaj > .ust select { border:0; background:none; font-weight:bold; text-transform:uppercase; letter-spacing:.06em; font-size:12px; }
+.bos { flex:1; }
+.pasaj > div.h { padding:8px; min-width:0; }
+.pasaj > div.h + div.h { border-inline-start:1px solid var(--cizgi); }
+textarea { width:100%; border:0; background:none; resize:none; outline:none; overflow:hidden; display:block; }
+textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
+.ar, .harekeli { direction:rtl; font:21px/1.9 Amiri, "Scheherazade New", "Traditional Arabic", serif; }
+.harekeli { white-space:pre-wrap; }
+.not { font-size:13px; margin-top:6px; padding-top:6px; border-top:1px dashed var(--cizgi); }
+.yesil { color:var(--yesil); } .sari { color:var(--sari); } .kirmizi { color:var(--kirmizi); }
+.oneri { margin:4px 0; } .oneri del { color:var(--kirmizi); } .oneri ins { color:var(--yesil); text-decoration:none; }
+.oneri small { color:var(--soluk); display:block; }
+#yan { position:fixed; top:0; right:0; bottom:0; width:min(420px, 100vw); background:var(--kagit); border-left:1px solid var(--cizgi);
+       padding:14px; overflow:auto; z-index:10; display:none; box-shadow:-6px 0 20px #0002; }
+#yan.acik { display:block; }
+#yan h2 { font-size:16px; margin:0 0 10px; display:flex; }
+#yan input, #yan textarea.kutu { border:1px solid var(--cizgi); background:#fff; border-radius:4px; padding:5px 8px; width:100%; }
+#yan table { width:100%; border-collapse:collapse; margin-top:10px; }
+#yan td { border-top:1px solid var(--cizgi); padding:4px; vertical-align:top; }
+#yanit { white-space:pre-wrap; margin-top:10px; }
+#durum { position:fixed; left:14px; bottom:14px; background:var(--yazi); color:#fff; padding:6px 12px; border-radius:4px;
+         font-size:13px; display:none; z-index:20; max-width:70vw; }
+#durum.hata { background:var(--kirmizi); }
+.ipucu { color:var(--soluk); font-size:13px; }
+@media (max-width:800px) { main { grid-template-columns:1fr; } #goruntu { position:static; max-height:50vh; } .pasaj { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Çeviri çalışma alanı</h1>
+  <button id="onceki" title="Önceki sayfa">‹</button>
+  <select id="sayfaSec"></select>
+  <button id="sonraki" title="Sonraki sayfa">›</button>
+  <div id="ilerleme"><div id="cubuk"><i></i></div><span id="oran"></span></div>
+  <label><input type="file" id="dosya" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" hidden><button id="yukleDugme">Yükle</button></label>
+  <button id="sozlukDugme">Sözlük</button>
+  <button id="sorDugme">Sor</button>
+  <button id="docxDugme">DOCX</button>
+</header>
+<main>
+  <div id="goruntu" title="Büyütmek için tıkla"></div>
+  <div>
+    <div id="arac"></div>
+    <div id="pasajlar"><p class="ipucu">Başlamak için PDF ya da sayfa görüntüsü yükle.</p></div>
+  </div>
+</main>
+<aside id="yan"></aside>
+<div id="durum"></div>
+<script>
+const $ = s => document.querySelector(s);
+const el = (etiket, ozellik = {}, ...cocuk) => {
+  const e = Object.assign(document.createElement(etiket), ozellik);
+  e.append(...cocuk.filter(c => c != null));
+  return e;
+};
+let sayfalar = [], sayfa = null;
+
+function bildir(mesaj, hata) {
+  const d = $('#durum');
+  d.textContent = mesaj; d.className = hata ? 'hata' : ''; d.style.display = mesaj ? 'block' : 'none';
+  clearTimeout(bildir.z);
+  if (mesaj && !hata) bildir.z = setTimeout(() => d.style.display = 'none', 2500);
+  if (hata) bildir.z = setTimeout(() => d.style.display = 'none', 12000);
+}
+async function api(yol, yontem = 'GET', govde) {
+  const secenek = { method: yontem };
+  if (govde instanceof FormData) secenek.body = govde;
+  else if (govde) { secenek.body = JSON.stringify(govde); secenek.headers = { 'Content-Type': 'application/json' }; }
+  let y;
+  try { y = await fetch(yol, secenek); } catch (e) { bildir('Sunucuya ulaşılamadı', true); throw e; }
+  if (!y.ok) {
+    let ayrinti = y.statusText;
+    try { const j = await y.json(); ayrinti = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch {}
+    bildir(ayrinti, true);
+    const h = new Error(ayrinti); h.kod = y.status; throw h;
+  }
+  return y.json();
+}
+// düğmeyi iş bitene kadar kilitler
+async function mesgul(dugme, is) {
+  dugme.disabled = true;
+  try { return await is(); } catch (e) { console.warn(e); } finally { dugme.disabled = false; }
+}
+const boyla = t => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; };
+
+async function sayfalariYukle(secilecek) {
+  sayfalar = await api('/api/pages');
+  const sec = $('#sayfaSec');
+  sec.replaceChildren(...sayfalar.map(s => el('option', { value: s.id, textContent: `s. ${s.no}  (${s.onayli}/${s.pasaj})` })));
+  const toplam = sayfalar.reduce((a, s) => a + s.pasaj, 0), onayli = sayfalar.reduce((a, s) => a + s.onayli, 0);
+  $('#cubuk i').style.width = toplam ? (100 * onayli / toplam) + '%' : '0';
+  $('#oran').textContent = toplam ? `${onayli}/${toplam} pasaj onaylı` : '';
+  const hedef = secilecek ?? sayfa?.id ?? sayfalar[0]?.id;
+  if (hedef != null && sayfalar.some(s => s.id == hedef)) { sec.value = hedef; if (sayfa?.id != hedef) await sayfaAc(hedef); }
+}
+async function sayfaAc(id) {
+  sayfa = await api('/api/pages/' + id);
+  $('#sayfaSec').value = id;
+  $('#goruntu').replaceChildren(el('img', { src: `/api/pages/${id}/image`, alt: 'sayfa ' + sayfa.no }));
+  ciz();
+}
+function ciz() {
+  const arac = $('#arac'), kutu = $('#pasajlar');
+  const ocrD = el('button', { textContent: sayfa.pasajlar.length ? 'Yeniden OCR' : 'OCR yap', className: sayfa.pasajlar.length ? '' : 'ana' });
+  ocrD.onclick = () => mesgul(ocrD, async () => {
+    bildir('OCR çalışıyor…');
+    try { sayfa = await api(`/api/pages/${sayfa.id}/ocr`, 'POST'); }
+    catch (e) {
+      if (e.kod !== 409 || !confirm(e.message + ' Devam edilsin mi?')) throw e;
+      sayfa = await api(`/api/pages/${sayfa.id}/ocr?zorla=true`, 'POST');
+    }
+    bildir('OCR tamam'); ciz(); sayfalariYukle();
+  });
+  const topluD = el('button', { textContent: 'Sayfayı çevir' });
+  topluD.onclick = () => mesgul(topluD, async () => {
+    for (const p of sayfa.pasajlar.filter(p => p.tur !== 'diger' && !p.tr.trim())) {
+      bildir(`Çevriliyor: pasaj ${p.sira + 1}…`);
+      degistir(await api(`/api/passages/${p.id}/translate`, 'POST'));
+    }
+    bildir('Çeviri tamam');
+  });
+  const silD = el('button', { textContent: 'Sayfayı sil' });
+  silD.onclick = () => confirm(`s. ${sayfa.no} ve pasajları silinsin mi?`) && mesgul(silD, async () => {
+    await api('/api/pages/' + sayfa.id, 'DELETE'); sayfa = null;
+    $('#goruntu').replaceChildren(); kutu.replaceChildren(); arac.replaceChildren(); await sayfalariYukle();
+  });
+  arac.replaceChildren(ocrD, sayfa.pasajlar.length ? topluD : null, silD,
+    el('span', { className: 'ipucu', textContent: 'Ctrl+Enter: onayla ve sonrakine geç' }));
+  kutu.replaceChildren(...sayfa.pasajlar.map(pasajDugumu));
+  if (!sayfa.pasajlar.length) kutu.append(el('p', { className: 'ipucu', textContent: 'Bu sayfa henüz OCR\'lanmadı.' }));
+  kutu.querySelectorAll('textarea').forEach(boyla);
+}
+function degistir(p) {  // sunucudan gelen pasajı yerine koy, yalnızca o satırı yeniden çiz
+  const i = sayfa.pasajlar.findIndex(x => x.id === p.id);
+  sayfa.pasajlar[i] = p;
+  const eski = document.getElementById('p' + p.id), yeni = pasajDugumu(p);
+  eski.replaceWith(yeni); yeni.querySelectorAll('textarea').forEach(boyla);
+  return yeni;
+}
+async function kaydet(p, alan) {
+  const yeni = await api('/api/passages/' + p.id, 'PATCH', alan);
+  return degistir(yeni);
+}
+function pasajDugumu(p) {
+  const tur = el('select', {}, ...['serh', 'hasiye', 'diger'].map(t => el('option', { value: t, textContent: { serh: 'Şerh', hasiye: 'Hâşiye', diger: 'Diğer' }[t] })));
+  tur.value = p.tur; tur.onchange = () => kaydet(p, { tur: tur.value }).then(() => sayfalariYukle());
+  const ar = el('textarea', { className: 'ar', value: p.ar, rows: 1, spellcheck: false });
+  const tr = el('textarea', { className: 'tr', value: p.tr, rows: 1, placeholder: p.tur === 'diger' ? '' : 'Çeviri…', lang: 'tr' });
+  ar.oninput = () => boyla(ar); tr.oninput = () => boyla(tr);
+  ar.onchange = () => ar.value.trim() ? kaydet(p, { ar: ar.value.trim() }) : (ar.value = p.ar);
+  tr.onchange = () => kaydet(p, { tr: tr.value });
+  const onayla = async sonrakineGec => {
+    const onayli = p.durum !== 'onayli' || sonrakineGec;
+    await kaydet(p, { tr: tr.value, durum: onayli ? 'onayli' : 'taslak' });
+    sayfalariYukle();
+    if (sonrakineGec) {
+      const sonraki = sayfa.pasajlar.find(x => x.sira > p.sira && x.tur !== 'diger' && x.durum !== 'onayli');
+      if (sonraki) document.querySelector(`#p${sonraki.id} .tr`).focus();
+      else bildir('Bu sayfadaki pasajların hepsi onaylı');
+    }
+  };
+  tr.onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); tr.onchange = null; onayla(true).catch(() => {}); } };
+  const dugme = (yazi, yol, bekle) => {
+    const d = el('button', { textContent: yazi });
+    d.onclick = () => mesgul(d, async () => { bildir(bekle); degistir(await api(`/api/passages/${p.id}/${yol}`, 'POST')); bildir(''); });
+    return d;
+  };
+  const oneriKutu = el('div');
+  const agentD = el('button', { textContent: 'Öneri' });
+  agentD.onclick = () => mesgul(agentD, async () => {
+    bildir('Çeviri denetleniyor…');
+    const liste = await api(`/api/passages/${p.id}/agent`, 'POST'); bildir('');
+    oneriKutu.className = 'not';
+    oneriKutu.replaceChildren(...liste.map(o => {
+      const satir = el('div', { className: 'oneri' }, el('del', { textContent: o.eski }), ' → ', el('ins', { textContent: o.yeni }), ' ');
+      const kabul = el('button', { textContent: 'Kabul' }), ret = el('button', { textContent: 'Ret' });
+      kabul.onclick = () => { if (tr.value.includes(o.eski)) { tr.value = tr.value.replace(o.eski, o.yeni); boyla(tr); api('/api/passages/' + p.id, 'PATCH', { tr: tr.value }).then(y => { p.tr = y.tr; }); } satir.remove(); };
+      ret.onclick = () => satir.remove();
+      satir.append(kabul, ' ', ret, el('small', { textContent: o.gerekce }));
+      return satir;
+    }));
+    if (!liste.length) oneriKutu.append(el('span', { className: 'yesil', textContent: 'Düzeltme önerisi yok.' }));
+  });
+  const onayD = el('button', { textContent: p.durum === 'onayli' ? '✓ Onaylı' : 'Onayla', className: p.durum === 'onayli' ? '' : 'ana' });
+  onayD.onclick = () => mesgul(onayD, () => onayla(false));
+  const metin = p.tur !== 'diger';
+  const arHucre = el('div', { className: 'h' }, ar);
+  if (p.ar_vocalized) {
+    const r = p.rasm;
+    const rozet = r.ayni ? el('span', { className: 'yesil', textContent: '✓ rasm aynı' })
+      : r.imla ? el('span', { className: 'sari', textContent: '● yalnız imla farkı (hemze/yâ/boşluk)' })
+      : el('span', { className: 'kirmizi', textContent: '⚠ harf değişti: ' + r.farklar.slice(0, 6).join(' | ') });
+    arHucre.append(el('div', { className: 'not' }, rozet, el('div', { className: 'harekeli', textContent: p.ar_vocalized })));
+  }
+  const trHucre = el('div', { className: 'h' }, tr);
+  if (p.sapma.length) trHucre.append(el('div', { className: 'not sari', textContent: 'Sözlük sapması: ' + p.sapma.map(t => `${t.ar} → ${t.tr}`).join(' · ') }));
+  trHucre.append(oneriKutu);
+  return el('section', { id: 'p' + p.id, className: `pasaj ${p.tur} ${p.durum}` },
+    el('div', { className: 'ust' }, tur, el('span', { className: 'bos' }),
+      metin ? dugme('Çevir', 'translate', 'Çevriliyor…') : null,
+      metin ? dugme(p.ar_vocalized ? 'Yeniden harekele' : 'Harekele', 'vocalize', 'Harekeleniyor…') : null,
+      metin ? agentD : null, metin ? onayD : null),
+    arHucre, trHucre);
+}
+
+// ---- üst çubuk ----
+$('#sayfaSec').onchange = e => sayfaAc(e.target.value);
+const kaydir = yon => { const i = sayfalar.findIndex(s => s.id == sayfa?.id) + yon; if (sayfalar[i]) sayfaAc(sayfalar[i].id); };
+$('#onceki').onclick = () => kaydir(-1); $('#sonraki').onclick = () => kaydir(1);
+$('#goruntu').onclick = () => $('#goruntu').classList.toggle('buyuk');
+$('#yukleDugme').onclick = () => $('#dosya').click();
+$('#dosya').onchange = async e => {
+  if (!e.target.files.length) return;
+  const f = new FormData(); for (const d of e.target.files) f.append('dosyalar', d);
+  bildir('Yükleniyor…');
+  await mesgul($('#yukleDugme'), async () => { const s = await api('/api/upload', 'POST', f); bildir(s.eklenen + ' sayfa eklendi'); await sayfalariYukle(); });
+  e.target.value = '';
+};
+$('#docxDugme').onclick = () => {
+  if (!sayfalar.some(s => s.pasaj)) return bildir('Dışa aktarılacak pasaj yok', true);
+  location.href = '/api/export.docx' + (confirm('Yalnızca onaylı pasajlar mı? (İptal: hepsi)') ? '?sadece_onayli=true' : '');
+};
+const yanAc = (baslik, ...icerik) => {
+  const kapat = el('button', { textContent: '×' }); kapat.onclick = () => $('#yan').classList.remove('acik');
+  $('#yan').replaceChildren(el('h2', {}, baslik, el('span', { className: 'bos' }), kapat), ...icerik); $('#yan').classList.add('acik');
+};
+$('#sozlukDugme').onclick = async () => {
+  const ar = el('input', { placeholder: 'Arapça terim', dir: 'rtl', className: 'ar' }), tr = el('input', { placeholder: 'Türkçe karşılık' });
+  const tablo = el('table');
+  const doldur = liste => tablo.replaceChildren(...liste.map(t => {
+    const sil = el('button', { textContent: '×' });
+    sil.onclick = async () => { doldur(await api('/api/glossary/' + t.id, 'DELETE')); if (sayfa) sayfaAc(sayfa.id); };
+    return el('tr', {}, el('td', { className: 'ar', textContent: t.ar }), el('td', { textContent: t.tr }), el('td', {}, sil));
+  }));
+  const ekle = el('button', { textContent: 'Ekle', className: 'ana' });
+  ekle.onclick = () => mesgul(ekle, async () => {
+    if (!ar.value.trim() || !tr.value.trim()) return bildir('İki alan da dolu olmalı', true);
+    doldur(await api('/api/glossary', 'POST', { ar: ar.value.trim(), tr: tr.value.trim() })); ar.value = tr.value = ''; ar.focus();
+    if (sayfa) sayfaAc(sayfa.id);  // sapma işaretleri yeniden hesaplansın
+  });
+  tr.onkeydown = e => e.key === 'Enter' && ekle.click();
+  yanAc('Sözlük', el('p', { className: 'ipucu', textContent: 'Pasajda geçen terimler çeviri isteğine eklenir; çeviride karşılığı yoksa pasaj işaretlenir.' }), ar, tr, ekle, tablo);
+  doldur(await api('/api/glossary'));
+};
+$('#sorDugme').onclick = () => {
+  const soru = el('textarea', { className: 'kutu', rows: 3, placeholder: 'Kitap hakkında soru…' }), yanit = el('div', { id: 'yanit' });
+  const sor = el('button', { textContent: 'Sor', className: 'ana' });
+  sor.onclick = () => mesgul(sor, async () => {
+    yanit.textContent = 'Yanıt bekleniyor…';
+    try { const y = await api('/api/ask', 'POST', { soru: soru.value.trim() }); yanit.textContent = y.yanit; }
+    catch (e) { yanit.textContent = ''; throw e; }
+  });
+  soru.onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sor.click(); };
+  yanAc('Sor', soru, sor, yanit); soru.focus();
+};
+sayfalariYukle().catch(() => {});
+</script>
+</body>
+</html>

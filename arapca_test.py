@@ -7,13 +7,15 @@ Kullanım:
 Çıktı: sonuc/<dosya>.json ve sonuc/rapor.md
 """
 import json
+import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 
-MODEL = "gemini-3.5-flash"
+MODEL = os.environ.get("ARAPCA_MODEL", "gemini-3.5-flash")
 HAREKE = re.compile(r"[ً-ْٰـ]")  # tenvin..sükun, hançer elif, tatvil
 
 OCR_PROMPT = """Bu, klasik bir Arapça fıkıh kitabının (matn + şerh + hâşiye) taranmış sayfasıdır.
@@ -60,21 +62,34 @@ def rasm(metin: str) -> str:
     return HAREKE.sub("", metin).strip()
 
 
+IMLA = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي"})
+
+
+def imla(metin: str) -> str:
+    """Hemze kürsüsü, elif-i maksûre/yâ ve boşluk farklarını yok sayan gevşek iskelet."""
+    return re.sub(r"\s+", "", metin.translate(IMLA))
+
+
 def rasm_kontrol(kaynak: str, harekeli: str) -> dict:
+    """ayni: harfi harfine aynı. imla: yalnızca hemze/yâ/boşluk farkı var. farklar: gerçek harf değişimleri."""
     a, b = rasm(kaynak), rasm(harekeli)
-    return {"ayni": a == b, "benzerlik": round(SequenceMatcher(None, a, b).ratio(), 4)}
+    x, y = imla(a), imla(b)
+    farklar = [f"{x[max(0, i1 - 6):i2 + 6]} → {y[max(0, j1 - 6):j2 + 6]}"
+               for t, i1, i2, j1, j2 in SequenceMatcher(None, x, y, autojunk=False).get_opcodes() if t != "equal"]
+    return {"ayni": a == b, "imla": x == y, "farklar": farklar,
+            "benzerlik": round(SequenceMatcher(None, a, b).ratio(), 4)}
 
 
 def cagir(client, contents, **config):
     from google.genai import errors
 
-    for deneme in range(3):
+    for deneme in range(6):
         try:
             return client.models.generate_content(model=MODEL, contents=contents, config=config or None)
         except errors.APIError as e:
-            if deneme == 2 or getattr(e, "code", 0) not in (429, 500, 503):
+            if deneme == 5 or getattr(e, "code", 0) not in (429, 500, 503):
                 raise
-            time.sleep(5 * (deneme + 1))
+            time.sleep(10 * (deneme + 1))
 
 
 def isle(client, yol: Path) -> dict:
@@ -84,24 +99,29 @@ def isle(client, yol: Path) -> dict:
     ocr = cagir(client, [resim, OCR_PROMPT],
                 response_mime_type="application/json", response_schema=OCR_SCHEMA)
     bloklar = json.loads(ocr.text)["bloklar"]
-    for b in bloklar:
-        if b["tur"] == "diger":
-            continue
-        b["harekeli"] = cagir(client, HAREKE_PROMPT.format(metin=b["metin"])).text.strip()
+    def doldur(b):
+        with ThreadPoolExecutor(2) as h:  # harekeleme ve çeviri birbirinden bağımsız
+            hareke = h.submit(cagir, client, HAREKE_PROMPT.format(metin=b["metin"]))
+            ceviri = h.submit(cagir, client, CEVIRI_PROMPT.format(metin=b["metin"]))
+            b["harekeli"] = hareke.result().text.strip()
+            b["ceviri"] = ceviri.result().text.strip()
         b["rasm"] = rasm_kontrol(b["metin"], b["harekeli"])
-        b["ceviri"] = cagir(client, CEVIRI_PROMPT.format(metin=b["metin"])).text.strip()
-    return {"dosya": yol.name, "bloklar": bloklar}
+
+    with ThreadPoolExecutor(4) as h:
+        list(h.map(doldur, [b for b in bloklar if b["tur"] != "diger"]))
+    return {"dosya": yol.name, "model": MODEL, "bloklar": bloklar}
 
 
 def rapor(sonuclar: list) -> str:
     satirlar = []
     for s in sonuclar:
-        satirlar.append(f"# {s['dosya']}\n")
+        satirlar.append(f"# {s['dosya']} ({s.get('model', 'gemini-3.5-flash')})\n")
         for b in s.get("bloklar", []):
             if b["tur"] == "diger":
                 continue
-            r = b["rasm"]
-            isaret = "✅" if r["ayni"] else f"⚠️ harf değişti (benzerlik {r['benzerlik']})"
+            r = rasm_kontrol(b["metin"], b["harekeli"])  # eski json'larda yeni alanlar olmayabilir
+            isaret = ("✅" if r["ayni"] else "🟡 yalnız imla (hemze/yâ/boşluk)" if r.get("imla")
+                      else "⚠️ harf değişti: " + " | ".join(r.get("farklar", [])[:10]))
             satirlar += [f"## {b['tur']} — rasm: {isaret}\n", f"<div dir=rtl>\n\n{b['harekeli']}\n\n</div>\n",
                          f"{b['ceviri']}\n"]
         if "hata" in s:
@@ -115,15 +135,23 @@ def main(yollar):
     client = genai.Client()  # GEMINI_API_KEY ortam değişkeninden okunur
     cikti = Path("sonuc")
     cikti.mkdir(exist_ok=True)
-    sonuclar = []
-    for y in map(Path, yollar):
+
+    def sayfa(y: Path) -> dict:
+        hedef = cikti / f"{y.stem}.json"
+        if hedef.exists():  # başarıyla bitmiş sayfayı yeniden işleme (API masrafı)
+            eski = json.loads(hedef.read_text(encoding="utf-8"))
+            if "hata" not in eski:
+                return eski
         print(f"→ {y.name}", flush=True)
         try:
             s = isle(client, y)
         except Exception as e:  # bir sayfa patlarsa diğerleri devam etsin
             s = {"dosya": y.name, "hata": f"{type(e).__name__}: {e}"}
-        (cikti / f"{y.stem}.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
-        sonuclar.append(s)
+        hedef.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        return s
+
+    with ThreadPoolExecutor(5) as h:
+        sonuclar = list(h.map(sayfa, map(Path, yollar)))
     (cikti / "rapor.md").write_text(rapor(sonuclar), encoding="utf-8")
     print("Bitti: sonuc/rapor.md")
 
