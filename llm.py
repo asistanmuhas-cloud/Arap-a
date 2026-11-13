@@ -11,6 +11,7 @@ MODELLER = {
     "hareke": "gemini-3.5-flash",
     "ceviri": "gemini-3.5-flash",
     "agent": "gemini-3.5-flash",
+    "sozluk": "gemini-3.1-flash-lite",  # onaylı pasajlardan sözlük adayı (istek üzerine)
 }
 # USD / 1M token: (girdi, çıktı). Çıktıya düşünme tokenları dahildir.
 FIYAT = {
@@ -19,7 +20,7 @@ FIYAT = {
     "gemini-3.1-pro-preview": (2.00, 12.00),  # doğrula: resmî fiyat sayfasıyla karşılaştırılmadı
 }
 # Kaçak (sonu gelmeyen) bir yanıt faturayı şişirmesin diye adım başına çıktı tavanı (token).
-CIKTI_TAVANI = {"ocr": 16000, "ocr2": 16000, "ceviri": 16000, "hareke": 24000, "agent": 4000}
+CIKTI_TAVANI = {"ocr": 16000, "ocr2": 16000, "ceviri": 16000, "hareke": 24000, "agent": 4000, "sozluk": 4000}
 _client = None
 
 
@@ -46,7 +47,7 @@ def llm(adim: str, contents, kayit=None, **config) -> str:
     if _client is None:
         _client = genai.Client(http_options={"api_version": "v1beta"})  # anahtar GEMINI_API_KEY'den; önizleme modelleri yalnız v1beta'da
     model = os.environ.get(f"MODEL_{adim.upper()}") or MODELLER[adim]
-    if adim in ("hareke", "ceviri", "ocr2"):  # düşünme tokenları çıktı fiyatından faturalanır; bu adımlarda kıs
+    if adim in ("hareke", "ceviri", "ocr2", "sozluk"):  # düşünme tokenları çıktı fiyatından faturalanır; bu adımlarda kıs
         config.setdefault("thinking_config", {"thinking_level": "low"})
     config.setdefault("max_output_tokens", CIKTI_TAVANI[adim])
     for deneme in range(3):

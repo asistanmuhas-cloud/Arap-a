@@ -22,6 +22,8 @@ cagrilar = []  # sahte LLM'e gelen adımlar
 istekler = []  # (adım, contents)
 OCR, OCR2 = {}, {}  # sayfa dosya adı -> sahte OCR yanıtı (str) ya da fırlatılacak hata
 HAREKE = {}  # asıl metin -> sahte harekeli metin
+CEVIRI = []  # doluysa sahte çeviri sıradakini döndürür
+SOZLUK = []  # sahte sözlük adayı yanıtı (str)
 
 
 def sahte(adim, contents, kayit=None, **config):
@@ -43,9 +45,13 @@ def sahte(adim, contents, kayit=None, **config):
         metin = contents.rsplit("\n\n", 1)[-1]
         return HAREKE.get(metin, "(وَفَرْضُ الْوُضُوءِ) أَيْ رُكْنُهُ")  # varsayılan: hemze ekledi, yalnız imla farkı
     if adim == "ceviri":
-        asil = contents.rsplit("bağlam sonu ---", 1)[-1]
-        assert "فرض = farz" in contents or "فرض" not in asil, "sözlük çeviri isteğine eklenmeli"
-        return "**Abdestin şartı** yani rüknü"  # sözlükten bilerek sapıyor
+        asil = contents.rsplit(" sonu ---", 1)[-1]  # bağlam/örnek/yönerge bloklarından sonraki asıl istek
+        sozlukte = any(t["ar"] == "فرض" for t in uyg.sozluk())
+        assert "فرض = farz" in contents or "فرض" not in asil or not sozlukte, "sözlük çeviri isteğine eklenmeli"
+        return CEVIRI.pop(0) if CEVIRI else "**Abdestin şartı** yani rüknü"  # sözlükten bilerek sapıyor
+    if adim == "sozluk":
+        assert config["response_schema"] == uyg.SOZLUK_SCHEMA and contents.startswith(uyg.SOZLUK_PROMPT[:40])
+        return SOZLUK.pop(0)
     if adim == "agent":
         return json.dumps({"oneriler": [{"eski": "şartı", "yeni": "farzı", "gerekce": "terim"},
                                         {"eski": "yok böyle", "yeni": "x", "gerekce": "uygulanamaz"}]})
@@ -85,6 +91,15 @@ llm.llm("agent", "x", kayit=defter.append)
 del os.environ["MODEL_AGENT"]
 assert defter[-1]["maliyet"] == (1000 * 2.00 + 500 * 12.00) / 1e6 and istemci.configler[-1][1]["max_output_tokens"] == 4000
 assert "ask" not in llm.MODELLER
+istemci.yanitlar = [("[]", "STOP"), ("[]", "STOP")]  # sözlük adayı: ucuz model, düşük düşünme, 4000 tavan
+llm.llm("sozluk", "x", kayit=defter.append)
+assert istemci.configler[-1] == ("gemini-3.1-flash-lite", {"thinking_config": {"thinking_level": "low"},
+                                                          "max_output_tokens": 4000})
+assert defter[-1]["maliyet"] == (1000 * 0.25 + 500 * 1.50) / 1e6
+os.environ["MODEL_SOZLUK"] = "gemini-3.5-flash"
+llm.llm("sozluk", "x", kayit=defter.append)
+del os.environ["MODEL_SOZLUK"]
+assert istemci.configler[-1][0] == "gemini-3.5-flash"
 
 llm.llm = sahte
 llm.resim = lambda yol: yol.name
@@ -297,13 +312,13 @@ OCR2[dosya[3]] = "bozuk json"
 
 # kitap ayarları: varsayılan kapalı, doğrulanır, yalnızca verilen değişir
 k = c.get(f"/api/books/{bid}").json()
-assert k["ayar"] == {"talik_bol": False, "cift_okuma": False} and k["kuyruk"] == 0
+assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False} and k["kuyruk"] == 0
 assert c.patch(f"/api/books/{bid}", json={"ayar": {"yok": True}}).status_code == 422
 assert c.patch(f"/api/books/{bid}", json={"ayar": {"talik_bol": "evet"}}).status_code == 422
-assert c.patch(f"/api/books/{bid}", json={"ayar": {"talik_bol": True}}).json()["ayar"] == {"talik_bol": True,
-                                                                                          "cift_okuma": False}
+assert c.patch(f"/api/books/{bid}", json={"ayar": {"talik_bol": True}}).json()["ayar"] == {
+    "talik_bol": True, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False}
 y = c.patch(f"/api/books/{bid}", json={"ayar": {"cift_okuma": True}}).json()
-assert y["ayar"] == {"talik_bol": True, "cift_okuma": True} and y["ad"] == g["ad"]
+assert y["ayar"] == {"talik_bol": True, "cift_okuma": True, "ceviri_bellegi": True, "ayet_isaret": False} and y["ad"] == g["ad"]
 assert [b["ayar"] for b in c.get("/api/books").json() if b["id"] == bid] == [y["ayar"]]
 
 # tahmin çift okumayla artar
@@ -514,7 +529,8 @@ with sqlite3.connect(onceki / "kitap.db") as e:
 (onceki / "sayfa" / "5-0001.jpg").write_bytes(jpg())
 uyg.VERI = onceki
 k = c.get("/api/books/5").json()
-assert k["ayar"] == {"talik_bol": False, "cift_okuma": False} and k["kuyruk"] == 1 and k["sayfalar"][0]["onayli"] == 1
+assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False} and k["kuyruk"] == 1
+assert k["sayfalar"][0]["onayli"] == 1 and k["yonerge"] == ""
 pasajlar = c.get("/api/pages/1").json()["pasajlar"]
 assert [(p["ar"], p["tr"], p["kutu"], p["lemma"], p["supheli"]) for p in pasajlar] == [
     ("قال [?] الشيخ", "Dedi", None, None, []), ("قوله قال ) اي الشيخ", "", None, None, [])]
@@ -526,6 +542,226 @@ with closing(sqlite3.connect(onceki / "kitap.db")) as e:
     assert {"kutu", "lemma", "bagli_id", "supheli", "kapali"} <= {r[1] for r in e.execute("PRAGMA table_info(passages)")}
 uyg._hazir.discard(onceki)
 assert c.get("/api/books/5").json()["ayar"]["cift_okuma"]  # yeniden açılışta veri duruyor
+with closing(sqlite3.connect(onceki / "kitap.db")) as e:
+    assert "yonerge" in {r[1] for r in e.execute("PRAGMA table_info(books)")}
+    assert e.execute("SELECT yonerge FROM books WHERE id=5").fetchone()[0] == ""
+
+# ======== çeviri kalitesi (temiz veri dizininde) ========
+kalite = Path(tempfile.mkdtemp())
+uyg.VERI = kalite
+
+# ---- çift okuma: kelime sınırı (boşluk) farkı sayılmaz, gerçek harf farkı sayılır ----
+B = lambda metin: [{"tur": "serh", "metin": metin}]  # noqa: E731
+assert uyg.okuma_karsilastir(B("قال اوالمعنى كذا وقد اعتبرا ذلك"), B("قال او المعنى كذا وقدا عتبرا ذلك")) == {}
+assert uyg.okuma_karsilastir(B("قال وهو هو كذا"), B("قال و هو هو كذا")) == {}  # hizalama bölünse de
+assert uyg.okuma_karsilastir(B("في الشئ ووضو كذا"), B("في الشيء ووضوء كذا")) == {}  # eski hemze yazımı
+assert uyg.okuma_karsilastir(B("قال كذا ٦ ثم"), B("قال كذا ثم")) == {}  # sayfa/dipnot rakamı
+assert uyg.okuma_karsilastir(B("قال اوالمعنى مدنية كذا"), B("قال او المعنى مدينة كذا")) == {
+    0: [{"kelime": "مدنية", "diger": "مدينة", "i": 2}]}  # boşluk farkının yanındaki gerçek fark kalır
+assert uyg.okuma_karsilastir(B("شرب الماء ثم"), B("شرب الما ثم")) == {0: [{"kelime": "الماء", "diger": "الما", "i": 1}]}
+r = uyg.okuma_karsilastir(B("قال فقد نفاسها كذا"), B("قال فد تنفاسها كذا"))[0]
+assert [(m["kelime"], m["diger"]) for m in r] == [("فقد", "فد"), ("نفاسها", "تنفاسها")]  # her kelime kendi karşılığıyla
+r = uyg.okuma_karsilastir(B("قال وقد اعتبرا مدنية كذا"), B("قال وقدا عتبرا مدينة كذا"))[0]
+assert [m["kelime"] for m in r] == ["مدنية"]  # aynı aralıkta yalnız harf farkı olan kelime
+assert uyg.okuma_karsilastir(B("قال يمسح كذا"), B("قال يمسح بمسح كذا")) == {
+    0: [{"kelime": "يمسح", "diger": "يمسح بمسح", "i": 1}]}  # fazladan kelime hâlâ fark
+
+# ---- kurulum: iki kitap, onaylı/taslak pasajlar doğrudan veritabanına ----
+kA = c.post("/api/upload", files=[("dosyalar", (f"a{i}.jpg", jpg())) for i in (1, 2)]).json()["kitaplar"][0]["id"]
+kB = c.post("/api/upload", files=[("dosyalar", ("b1.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+sA = [s["id"] for s in c.get(f"/api/books/{kA}").json()["sayfalar"]]
+sB = c.get(f"/api/books/{kB}").json()["sayfalar"][0]["id"]
+assert c.get(f"/api/books/{kA}").json()["ayar"]["ceviri_bellegi"] is True  # bellek varsayılan açık
+
+
+def pasaj(sid, tur, ar, tr="", durum="taslak"):
+    return uyg.yaz("INSERT INTO passages(page_id, sira, tur, ar, tr, durum) VALUES(?, (SELECT COUNT(*) FROM passages "
+                   "WHERE page_id=?), ?, ?, ?, ?)", sid, sid, tur, ar, tr, durum)
+
+
+ORTAK = "غسل الوجه واليدين ومسح الرأس وغسل الرجلين فرض في الوضوء"
+hedefp = pasaj(sA[1], "serh", "(وفرض الوضوء) " + ORTAK + " عند علمائنا")
+benzerA = pasaj(sA[0], "serh", ORTAK + " كذا قال", "Yüzü ve elleri yıkamak, başı meshetmek A", "onayli")
+hasiyeA = pasaj(sA[0], "hasiye", ORTAK + " قوله", "Hâşiye örneği A", "onayli")
+benzerB = pasaj(sB, "serh", "(وفرض الوضوء) " + ORTAK + " عند علمائنا", "Öbür kitaptan birebir örnek B", "onayli")
+taslakA = pasaj(sA[0], "serh", ORTAK, "Taslak çeviri", "taslak")  # onaylı değil: örnek olmaz
+uzakA = pasaj(sA[0], "serh", "باب التيمم يجوز بالصعيد الطاهر عند عدم الماء", "Uzak pasaj", "onayli")  # eşik altı
+uzunA = pasaj(sA[0], "serh", ORTAK + " زيادة", "Ç" * 1500, "onayli")  # benzer ama sığmaz
+p = uyg.bul("passages", hedefp)
+skor = lambda x: (lambda a, b: len(a & b) / len(a | b))(uyg.kelime_kumesi(p["ar"]), uyg.kelime_kumesi(x))  # noqa
+assert skor(uyg.bul("passages", benzerB)["ar"]) == 1 > skor(uyg.bul("passages", benzerA)["ar"]) >= uyg.BELLEK_ESIK
+assert skor(uyg.bul("passages", uzakA)["ar"]) < uyg.BELLEK_ESIK
+ornekler = [o["id"] for o in uyg.benzer_ornekler(p, kA)]
+assert ornekler == [benzerA, hasiyeA, benzerB], ornekler  # aynı kitap > aynı katman > benzerlik; taslak/uzak/uzun yok
+
+istekler.clear()
+assert c.post(f"/api/passages/{hedefp}/translate").status_code == 200
+[ct] = [x for a, x in istekler if a == "ceviri"]
+ornek_blok = ct.split("Örnek çeviriler")[1].split("--- örnekler sonu ---")[0]
+assert "YALNIZCA ÜSLUP VE TERİM ÖRNEĞİ, ÇEVİRME" in ornek_blok and ct.endswith(p["ar"])
+assert "Taslak" not in ct
+assert "Uzak pasaj" not in ct and "ÇÇÇ" not in ct and ornek_blok.count("[Örnek ") == 3
+assert sum(len(uyg.bul("passages", k)["ar"]) + len(uyg.bul("passages", k)["tr"]) for k in ornekler) <= uyg.BELLEK_SINIR
+assert ct.index("Yüzü ve elleri") < ct.index("Hâşiye örneği") < ct.index("Öbür kitaptan")
+# sınır: sığmayan atlanır, sonrakiler denenir
+uyg.BELLEK_SINIR = len(uyg.bul("passages", benzerA)["ar"]) + len(uyg.bul("passages", benzerA)["tr"]) + 60
+assert [o["id"] for o in uyg.benzer_ornekler(p, kA)] == [benzerA]
+uyg.BELLEK_SINIR = 1500
+# kendi kendine örnek olmaz; ayar kapalıyken örnek eklenmez
+assert hedefp not in [o["id"] for o in uyg.benzer_ornekler({**p, "durum": "onayli"}, kA)]
+c.patch(f"/api/books/{kA}", json={"ayar": {"ceviri_bellegi": False}})
+istekler.clear()
+assert c.post(f"/api/passages/{hedefp}/translate").status_code == 200
+assert "Örnek çeviriler" not in istekler[-1][1]
+c.patch(f"/api/books/{kA}", json={"ayar": {"ceviri_bellegi": True}})
+# binlerce onaylı pasajda hız: kelime kümeleri önbellekte
+import random  # noqa: E402
+import time  # noqa: E402
+
+rnd = random.Random(1)
+sozcukler = ["".join(rnd.choice("ابتثجحخدذرزسشصضطظعغفقكلمنهوي") for _ in range(rnd.randint(3, 7))) for _ in range(3000)]
+with closing(uyg.db()) as e, e:
+    e.executemany("INSERT INTO passages(page_id, sira, tur, ar, tr, durum) VALUES(?, 99, 'serh', ?, ?, 'onayli')",
+                  [(sB, " ".join(rnd.choices(sozcukler, k=120)), "x" * 600) for _ in range(5000)])
+uyg.benzer_ornekler(p, kA)
+bas = time.perf_counter()
+for _ in range(3):
+    assert [o["id"] for o in uyg.benzer_ornekler(p, kA)] == [benzerA, hasiyeA, benzerB]
+sure = (time.perf_counter() - bas) / 3
+assert sure < 1.0, f"bellek araması yavaş: {sure:.2f} sn"
+print(f"bellek: 5000+ onaylı pasajda arama {sure * 1000:.0f} ms")
+with closing(uyg.db()) as e, e:
+    e.execute("DELETE FROM passages WHERE sira=99")
+
+# ---- kitap yönergesi: çeviri ve öneri isteğine girer, en fazla 2000 karakter ----
+YON = "Dua cümleleri (r.a.) biçiminde; müellif adları: Kâsânî, Serahsî."
+assert c.patch(f"/api/books/{kA}", json={"yonerge": "x" * 2001}).status_code == 422
+assert c.patch(f"/api/books/{kA}", json={"yonerge": 5}).status_code == 422
+y = c.patch(f"/api/books/{kA}", json={"yonerge": "  " + YON + "  "}).json()
+assert y["yonerge"] == YON and y["ayar"]["ceviri_bellegi"]  # ayarlar korunur
+assert [b["yonerge"] for b in c.get("/api/books").json() if b["id"] == kA] == [YON]
+assert c.get(f"/api/books/{kA}").json()["yonerge"] == YON
+assert c.patch(f"/api/books/{kA}", json={"ayar": {"ayet_isaret": False}}).json()["yonerge"] == YON
+istekler.clear()
+assert c.post(f"/api/passages/{hedefp}/translate").status_code == 200
+assert YON in istekler[-1][1] and istekler[-1][1].endswith(p["ar"])
+c.patch(f"/api/passages/{hedefp}", json={"tr": "Abdestin farzı"})
+assert c.post(f"/api/passages/{hedefp}/agent").status_code == 200
+assert istekler[-1][0] == "agent" and YON in istekler[-1][1]
+istekler.clear()
+c.post(f"/api/passages/{uzakA}/agent")
+assert YON in istekler[-1][1]  # öneri: aynı kitabın her pasajında
+diger_kitap = pasaj(sB, "serh", "قال", "Dedi")
+c.post(f"/api/passages/{diger_kitap}/agent")
+assert YON not in istekler[-1][1]  # başka kitabın isteğine girmez
+assert c.patch(f"/api/books/{kA}", json={"yonerge": ""}).json()["yonerge"] == ""
+assert c.post(f"/api/passages/{hedefp}/translate").status_code == 200
+assert "üslup yönergesi" not in istekler[-1][1]
+
+# ---- âyet/hadis işaretleme: talimat yalnız ayar açıkken; etiketler kuyruğa düşer ----
+istekler.clear()
+assert c.post(f"/api/passages/{hedefp}/translate").status_code == 200
+assert uyg.AYET_PROMPT not in istekler[-1][1]  # varsayılan kapalı
+assert c.get(f"/api/books/{kA}").json()["ayar"]["ayet_isaret"] is False
+c.patch(f"/api/books/{kA}", json={"ayar": {"ayet_isaret": True}})
+TR = ('Nitekim *yüzlerinizi ve dirseklere kadar ellerinizi yıkayın* [Mâide 5/6] buyrulmuştur; '
+      '*namaza kalktığınızda* [âyet ?] ve "Ameller niyetlere göredir" [hadis]. Ayrıca [Âl-i İmrân 3/7].')
+CEVIRI.append(TR)
+assert c.post(f"/api/passages/{hedefp}/translate").json()["tr"] == TR
+assert uyg.AYET_PROMPT in istekler[-1][1] and istekler[-1][1].endswith(p["ar"])
+q = [m for m in c.get(f"/api/books/{kA}/queue").json() if m["tur"] == "ayet"]
+assert [(m["kelime"], m["alan"], m["katman"]) for m in q] == [
+    ("[Mâide 5/6]", "tr", "serh"), ("[âyet ?]", "tr", "serh"), ("[Âl-i İmrân 3/7]", "tr", "serh")]
+assert all(TR[m["bas"]:m["son"]] == m["kelime"] for m in q) and q[0]["once"].endswith("yıkayın*")
+assert q[0]["sonra"].startswith("buyrulmuştur") and q[0]["passage_id"] == hedefp and q[0]["page_id"] == sA[1]
+assert c.get(f"/api/books/{kA}").json()["kuyruk"] == 3
+assert c.post(f"/api/passages/{hedefp}/dismiss", json={"anahtar": q[0]["anahtar"]}).json() == {"kalan": 2}
+assert [m["kelime"] for m in c.get(f"/api/books/{kA}/queue").json()] == ["[âyet ?]", "[Âl-i İmrân 3/7]"]
+c.patch(f"/api/passages/{hedefp}", json={"tr": TR.replace(" Ayrıca [Âl-i İmrân 3/7].", "")})  # etiket silindi
+assert [m["kelime"] for m in c.get(f"/api/books/{kA}/queue").json()] == ["[âyet ?]"]
+c.patch(f"/api/passages/{hedefp}", json={"tr": TR.replace("[âyet ?]", "[Mâide 5/6]")})  # düzeltildi: yeni madde
+assert [m["kelime"] for m in c.get(f"/api/books/{kA}/queue").json()] == ["[Mâide 5/6]", "[Âl-i İmrân 3/7]"]
+c.patch(f"/api/books/{kA}", json={"ayar": {"ayet_isaret": False}})
+assert len(c.get(f"/api/books/{kA}/queue").json()) == 2  # ayar kapansa da çevirideki etiketler doğrulanmalı
+assert uyg.AYET_ETIKET.findall("[hadis] [s. 2] [Bakara 2/255] [ayet?] [3/4]") == ["[Bakara 2/255]", "[ayet?]"]
+
+# ---- DOCX: *italik* ve **kalın** biçime çevrilir ----
+c.patch(f"/api/passages/{hedefp}", json={"tr": "**Abdestin farzı** yani *yüzlerinizi yıkayın* [Mâide 5/6] ve 2 * 3",
+                                         "durum": "onayli"})
+y = c.get(f"/api/books/{kA}/export.docx?sadece_onayli=true")
+kosular = [r for row in Document(io.BytesIO(y.content)).tables[0].rows for r in row.cells[0].paragraphs[0].runs]
+bicim = {r.text: (bool(r.bold), bool(r.italic)) for r in kosular}
+assert bicim["Abdestin farzı"] == (True, False) and bicim["yüzlerinizi yıkayın"] == (False, True), bicim
+assert bicim[" [Mâide 5/6] ve 2 * 3"] == (False, False) and not any("*" in t for t in bicim if "yıkayın" in t)
+
+# ---- sözlük adayı: istek üzerine ucuz model; sunucu eler; deftere yazılır; bütçe aşılınca çağrılmaz ----
+c.post("/api/glossary", json={"ar": "فرض", "tr": "farz"})
+bos = c.post("/api/upload", files=[("dosyalar", ("bos.jpg", jpg()))]).json()["kitaplar"][0]["id"]
+cagrilar.clear()
+y = c.post(f"/api/books/{bos}/glossary-candidates")
+assert y.status_code == 422 and "onaylı pasaj yok" in y.json()["detail"] and cagrilar == []
+assert c.post("/api/books/999/glossary-candidates").status_code == 404
+c.patch(f"/api/passages/{benzerA}", json={"tr": "Yüzü yıkamak ve başı meshetmek abdestin farzıdır; niyet sünnettir."})
+SOZLUK.append(json.dumps([
+    {"ar": "مَسْح", "tr": "meshetmek", "ornek": "başı meshetmek"},  # geçerli (harekesi atılır)
+    {"ar": "فرض", "tr": "farz", "ornek": "farzıdır"},  # sözlükte zaten var
+    {"ar": "تيمم", "tr": "teyemmüm", "ornek": ""},  # Arapça var (uzak pasaj), Türkçe çevirilerde yok
+    {"ar": "نية", "tr": "niyet", "ornek": ""},  # Türkçe var, Arapça pasajlarda yok
+    {"ar": "و", "tr": "ve", "ornek": ""},  # tek harf
+    {"ar": "الوجه", "tr": " ", "ornek": ""},  # boş karşılık
+    {"ar": "مسح", "tr": "mesh", "ornek": "tekrar"},  # aynı terim ikinci kez
+    {"ar": "غسل", "tr": "Yıkamak", "ornek": "x" * 500},  # büyük/küçük harf farkı önemsiz; örnek kısaltılır
+    {"tr": "eksik"}, "bozuk"]))
+defter_oncesi = len(uyg.sor("SELECT id FROM usage"))
+cagrilar.clear()
+y = c.post(f"/api/books/{kA}/glossary-candidates").json()
+assert cagrilar == ["sozluk"] and y["onerilen"] == 10 and y["pasaj"] == 5
+assert [(a["ar"], a["tr"]) for a in y["adaylar"]] == [("مسح", "meshetmek"), ("غسل", "Yıkamak")], y
+assert y["adaylar"][1]["ornek"] == "x" * 200
+istem = istekler[-1][1]
+assert "Sözlükte zaten olanları önerme: فرض" in istem and "Uzak pasaj" in istem and "Taslak çeviri" not in istem
+assert istem.index("Ç" * 50) < istem.index("Uzak pasaj") < istem.index("Yüzü yıkamak")  # en yeniler önce
+defter = uyg.sor("SELECT adim, book_id, page_id FROM usage")[defter_oncesi:]
+assert defter == [{"adim": "sozluk", "book_id": kA, "page_id": None}]
+assert [b["maliyet"] for b in c.get("/api/books").json() if b["id"] == kA][0] >= 0.01
+# 20 bin karakter sınırı: sığanlar alınır, en yeniler öncelikli
+for _ in range(8):
+    pasaj(sA[0], "serh", "قال " * 700, "Uzun onaylı çeviri " * 40, "onayli")
+SOZLUK.append("[]")
+y = c.post(f"/api/books/{kA}/glossary-candidates").json()
+assert len(istekler[-1][1]) < uyg.ADAY_SINIR + 2000 and 5 <= y["pasaj"] < 13 and y["adaylar"] == []
+SOZLUK.append("{bozuk")
+assert c.post(f"/api/books/{kA}/glossary-candidates").status_code == 502
+cagrilar.clear()
+uyg.GUNLUK_BUTCE = 0.0001
+y = c.post(f"/api/books/{kA}/glossary-candidates")
+assert y.status_code == 429 and cagrilar == []
+uyg.GUNLUK_BUTCE = 100
+
+# ---- yalnız matn görünümü (LLM yok): şerhteki ( … ) ve çevirideki **…** sırayla ----
+cagrilar.clear()
+m1 = pasaj(sA[1], "serh", "(فرض الوضوء) اي ركنه (غسل الوجه) وهو", "**Abdestin farzı** yani rüknü **yüzü yıkamak**")
+m2 = pasaj(sA[1], "serh", "قال (ومسح ربع الرأس) و (الكعبان)", "Dedi: **başın dörtte birini meshetmek**")
+m3 = pasaj(sA[1], "hasiye", "قوله فرض الوضوء ) اي (ركنه)", "**hâşiye**")  # hâşiye: matn değil
+m4 = pasaj(sA[1], "serh", "(باب التيمم)", "")  # çevrilmemiş
+m5 = pasaj(sA[1], "serh", "قال الشارح كذا", "Düz çeviri")  # parantez/kalın yok: listelenmez
+pasaj(sA[0], "serh", "(بسم الله)", "**Besmele**")  # önceki sayfa önce gelir
+liste = c.get(f"/api/books/{kA}/matn").json()
+assert cagrilar == [] and c.get("/api/books/999/matn").status_code == 404
+ids = [x["passage_id"] for x in liste]
+assert m3 not in ids and m5 not in ids and ids.index(m1) < ids.index(m2) < ids.index(m4)
+assert liste[0]["no"] == 1 and [x["metin"] for x in liste[0]["ar"]] == ["بسم الله"]
+x1, x2, x4 = (liste[ids.index(k)] for k in (m1, m2, m4))
+assert [a["metin"] for a in x1["ar"]] == ["فرض الوضوء", "غسل الوجه"] and not x1["uyusmaz"]
+assert [t["metin"] for t in x1["tr"]] == ["Abdestin farzı", "yüzü yıkamak"] and x1["page_id"] == sA[1]
+ar1, tr1 = uyg.bul("passages", m1)["ar"], uyg.bul("passages", m1)["tr"]
+assert all(ar1[a["bas"]:a["son"]].strip() == a["metin"] for a in x1["ar"])
+assert all(tr1[t["bas"]:t["son"]] == t["metin"] for t in x1["tr"])
+assert x2["uyusmaz"] and len(x2["ar"]) == 2 and len(x2["tr"]) == 1  # gösterilir ama işaretli
+assert x4["cevrilmemis"] and not x4["uyusmaz"] and x4["tr"] == []
+assert c.get(f"/api/books/{bos}/matn").json() == []
+
+shutil.rmtree(kalite)
 
 shutil.rmtree(os.environ["ARAPCA_VERI"])
 shutil.rmtree(eski)
