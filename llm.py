@@ -29,13 +29,16 @@ def llm(adim: str, contents, **config) -> str:
     from google.genai import errors
 
     if _client is None:
-        _client = genai.Client()  # GEMINI_API_KEY ortam değişkeninden okunur
+        _client = genai.Client(http_options={"api_version": "v1beta"})  # anahtar GEMINI_API_KEY'den; önizleme modelleri yalnız v1beta'da
     model = os.environ.get(f"MODEL_{adim.upper()}") or MODELLER[adim]
+    if adim in ("hareke", "ceviri"):  # düşünme tokenları çıktı fiyatından faturalanır; bu adımlarda kıs
+        config.setdefault("thinking_config", {"thinking_level": "low"})
     for deneme in range(3):
         try:
             yanit = _client.models.generate_content(model=model, contents=contents, config=config or None)
             if not (yanit.text or "").strip():
-                raise RuntimeError(f"{model} boş yanıt döndürdü")
+                neden = yanit.candidates[0].finish_reason if yanit.candidates else None
+                raise RuntimeError(f"{model} boş yanıt döndürdü (finish_reason={neden})")
             return yanit.text.strip()
         except errors.APIError as e:
             gunluk_kota = "per day" in str(e)  # beklemekle geçmez

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 import llm as llm_modul
-from arapca_test import CEVIRI_PROMPT, HAREKE_PROMPT, OCR_PROMPT, OCR_SCHEMA, imla, rasm, rasm_kontrol
+from arapca_test import CEVIRI_PROMPT, HAREKE_PROMPT, OCR_PROMPT, OCR_SCHEMA, imla, parcali, rasm, rasm_kontrol
 
 KOK = Path(__file__).parent
 VERI = Path(os.environ.get("ARAPCA_VERI", KOK / "data"))
@@ -100,6 +100,14 @@ def ai(adim: str, contents, **config) -> str:
     try:
         return llm_modul.llm(adim, contents, **config)
     except Exception as e:  # API/kota/ağ hatası arayüze okunur biçimde gitsin
+        raise HTTPException(502, f"{adim}: {type(e).__name__}: {str(e)[:300]}")
+
+
+def ai_parcali(adim: str, istek, metin: str) -> str:
+    """istek(parça) -> prompt. RECITATION engelinde metni bölerek dener (bkz. parcali)."""
+    try:
+        return parcali(lambda m: llm_modul.llm(adim, istek(m)), metin)
+    except Exception as e:
         raise HTTPException(502, f"{adim}: {type(e).__name__}: {str(e)[:300]}")
 
 
@@ -241,7 +249,8 @@ def cevir(kid: int):
     p = bul("passages", kid)
     if p["durum"] == "onayli":
         raise HTTPException(409, "Onaylı pasaj yeniden çevrilmez; önce onayı kaldır")
-    tr = ai("ceviri", sozluk_metni(p["ar"]) + CEVIRI_PROMPT.format(metin=p["ar"]))
+    sozluk_ek = sozluk_metni(p["ar"])
+    tr = ai_parcali("ceviri", lambda m: sozluk_ek + CEVIRI_PROMPT.format(metin=m), p["ar"])
     yaz("UPDATE passages SET tr=? WHERE id=?", tr, kid)
     return zengin(bul("passages", kid))
 
@@ -249,7 +258,7 @@ def cevir(kid: int):
 @app.post("/api/passages/{kid}/vocalize")
 def harekele(kid: int):
     p = bul("passages", kid)
-    yaz("UPDATE passages SET ar_vocalized=? WHERE id=?", ai("hareke", HAREKE_PROMPT.format(metin=p["ar"])), kid)
+    yaz("UPDATE passages SET ar_vocalized=? WHERE id=?", ai_parcali("hareke", lambda m: HAREKE_PROMPT.format(metin=m), p["ar"]), kid)
     return zengin(bul("passages", kid))
 
 

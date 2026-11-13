@@ -16,6 +16,9 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 MODEL = os.environ.get("ARAPCA_MODEL", "gemini-3.5-flash")
+OCR_MODEL = os.environ.get("ARAPCA_OCR_MODEL", MODEL)  # katman ayrımı için daha güçlü model verilebilir
+# Düşünme tokenları çıktı fiyatından faturalanır; harekelemede sınırsız bırakılınca sayfa başına ~40 bin token yaktı.
+AZ_DUSUN = {"thinking_config": {"thinking_level": "low"}}
 HAREKE = re.compile(r"[ً-ْٰـ]")  # tenvin..sükun, hançer elif, tatvil
 
 OCR_PROMPT = """Bu, klasik bir Arapça fıkıh kitabının (matn + şerh + hâşiye) taranmış sayfasıdır.
@@ -80,36 +83,62 @@ def rasm_kontrol(kaynak: str, harekeli: str) -> dict:
             "benzerlik": round(SequenceMatcher(None, a, b).ratio(), 4)}
 
 
-def cagir(client, contents, **config):
+def cagir(client, contents, model=None, **config):
     from google.genai import errors
 
     for deneme in range(6):
         try:
-            return client.models.generate_content(model=MODEL, contents=contents, config=config or None)
+            yanit = client.models.generate_content(model=model or MODEL, contents=contents, config=config or None)
+            if not (yanit.text or "").strip():
+                raise RuntimeError(f"boş yanıt (finish_reason={yanit.candidates[0].finish_reason if yanit.candidates else None})")
+            return yanit
         except errors.APIError as e:
             if deneme == 5 or getattr(e, "code", 0) not in (429, 500, 503):
                 raise
             time.sleep(10 * (deneme + 1))
 
 
+def parcali(uret, metin: str, derinlik: int = 0) -> str:
+    """uret(metin) -> str. Gemini klasik metni "ezber" sayıp boş dönerse (RECITATION) metni ikiye bölüp dener."""
+    try:
+        return uret(metin)
+    except RuntimeError as e:
+        orta = metin.find(" ", len(metin) // 2)
+        if "RECITATION" not in str(e) or derinlik >= 3 or orta < 0:
+            raise
+        return parcali(uret, metin[:orta], derinlik + 1) + " " + parcali(uret, metin[orta + 1:], derinlik + 1)
+
+
+def jeton(yanit) -> list:
+    """[girdi, çıktı] token sayısı; çıktıya düşünme tokenları dahildir (onlar da faturalanır)."""
+    u = yanit.usage_metadata
+    return [u.prompt_token_count or 0, (u.candidates_token_count or 0) + (u.thoughts_token_count or 0)]
+
+
 def isle(client, yol: Path) -> dict:
     from google.genai import types
 
     resim = types.Part.from_bytes(data=yol.read_bytes(), mime_type="image/jpeg")
-    ocr = cagir(client, [resim, OCR_PROMPT],
+    ocr = cagir(client, [resim, OCR_PROMPT], model=OCR_MODEL,
                 response_mime_type="application/json", response_schema=OCR_SCHEMA)
     bloklar = json.loads(ocr.text)["bloklar"]
+    kullanim = {"ocr": jeton(ocr), "hareke": [0, 0], "ceviri": [0, 0]}
     def doldur(b):
+        def uret(ad, sablon):
+            def tek(metin):
+                yanit = cagir(client, sablon.format(metin=metin), **AZ_DUSUN)
+                kullanim[ad] = [x + z for x, z in zip(kullanim[ad], jeton(yanit))]
+                return yanit.text.strip()
+            return parcali(tek, b["metin"])
+
         with ThreadPoolExecutor(2) as h:  # harekeleme ve çeviri birbirinden bağımsız
-            hareke = h.submit(cagir, client, HAREKE_PROMPT.format(metin=b["metin"]))
-            ceviri = h.submit(cagir, client, CEVIRI_PROMPT.format(metin=b["metin"]))
-            b["harekeli"] = hareke.result().text.strip()
-            b["ceviri"] = ceviri.result().text.strip()
+            hareke, ceviri = h.submit(uret, "hareke", HAREKE_PROMPT), h.submit(uret, "ceviri", CEVIRI_PROMPT)
+            b["harekeli"], b["ceviri"] = hareke.result(), ceviri.result()
         b["rasm"] = rasm_kontrol(b["metin"], b["harekeli"])
 
     with ThreadPoolExecutor(4) as h:
         list(h.map(doldur, [b for b in bloklar if b["tur"] != "diger"]))
-    return {"dosya": yol.name, "model": MODEL, "bloklar": bloklar}
+    return {"dosya": yol.name, "model": MODEL, "ocr_model": OCR_MODEL, "jeton_girdi_cikti": kullanim, "bloklar": bloklar}
 
 
 def rapor(sonuclar: list) -> str:
@@ -132,7 +161,7 @@ def rapor(sonuclar: list) -> str:
 def main(yollar):
     from google import genai
 
-    client = genai.Client()  # GEMINI_API_KEY ortam değişkeninden okunur
+    client = genai.Client(http_options={"api_version": "v1beta"})  # önizleme modelleri yalnız v1beta'da; anahtar GEMINI_API_KEY'den
     cikti = Path("sonuc")
     cikti.mkdir(exist_ok=True)
 
