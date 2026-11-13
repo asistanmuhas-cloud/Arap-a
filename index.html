@@ -60,13 +60,25 @@ table.arsiv { width:100%; border-collapse:collapse; background:var(--kagit); bor
 /* düzenleme */
 #duzen { display:grid; grid-template-columns:minmax(260px, 30%) 1fr; gap:14px; padding:14px; align-items:start; }
 #goruntu { position:sticky; top:62px; max-height:calc(100vh - 76px); overflow:auto; border:1px solid var(--cizgi); background:#fff; }
+#goruntu .sayfaKutu { position:relative; }
+#goruntu.buyuk .sayfaKutu { width:200%; }
 #goruntu img { width:100%; display:block; cursor:zoom-in; }
-#goruntu.buyuk img { width:200%; cursor:zoom-out; }
+#goruntu.buyuk img { cursor:zoom-out; }
+.vurgu { position:absolute; border:2px solid var(--vurgu); background:#7a3b1220; border-radius:3px; pointer-events:none;
+         box-shadow:0 0 0 2000px #26221c14; }
 #arac { display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
 .pasaj { display:grid; grid-template-columns:1fr 1fr; gap:0; background:var(--kagit); border:1px solid var(--cizgi);
          border-inline-start:4px solid var(--cizgi); margin-bottom:10px; }
 .pasaj.onayli { border-inline-start-color:var(--yesil); }
 .pasaj.diger { opacity:.6; }
+.pasaj.parla { animation:parla 1.8s ease-out; }
+@keyframes parla { from { box-shadow:0 0 0 3px var(--sari); background:#fff6d8; } to { box-shadow:0 0 0 3px transparent; } }
+.lemma { direction:rtl; font:bold 17px/1.4 Amiri, "Scheherazade New", "Traditional Arabic", serif; color:var(--vurgu);
+         min-width:0; overflow-wrap:anywhere; }
+.pasaj > .etiketler { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:5px; align-items:center; padding:5px 8px;
+                      border-top:1px dashed var(--cizgi); font-size:12px; color:var(--soluk); }
+.etiket { direction:rtl; font:15px/1.4 Amiri, "Scheherazade New", serif; padding:0 8px; border-radius:9px; background:#fff;
+          max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pasaj > .ust { grid-column:1/-1; display:flex; gap:6px; align-items:center; padding:5px 8px;
                 border-bottom:1px solid var(--cizgi); font-size:13px; flex-wrap:wrap; }
 .pasaj > .ust select { border:0; background:none; font-weight:bold; text-transform:uppercase; letter-spacing:.06em; font-size:12px; }
@@ -84,10 +96,23 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
 #yan { position:fixed; top:0; right:0; bottom:0; width:min(420px, 100vw); background:var(--kagit); border-left:1px solid var(--cizgi);
        padding:14px; overflow:auto; z-index:10; display:none; box-shadow:-6px 0 20px #0002; }
 #yan.acik { display:block; }
+@media (min-width:900px) { body:has(#yan.acik) :is(#duzen, .gorunum) { margin-inline-end:min(420px, 100vw); } }  /* panel içeriği örtmesin */
 #yan h2 { font-size:16px; margin:0 0 10px; display:flex; }
 #yan input { border:1px solid var(--cizgi); background:#fff; border-radius:4px; padding:5px 8px; width:100%; }
 #yan table { width:100%; border-collapse:collapse; margin-top:10px; }
 #yan td { border-top:1px solid var(--cizgi); padding:4px; vertical-align:top; }
+#yan .ayar { display:flex; gap:10px; align-items:flex-start; padding:10px 0; border-top:1px solid var(--cizgi); cursor:pointer; }
+#yan .ayar input { width:auto; margin-top:4px; }
+#yan .ayar small { display:block; margin-top:2px; }
+.sayac { display:inline-block; min-width:18px; margin-inline-start:4px; padding:0 5px; border-radius:9px; font-size:11px;
+         background:var(--sari); color:#fff; text-align:center; }
+.kuyruk { list-style:none; margin:0; padding:0; }
+.kuyruk li { border-top:1px solid var(--cizgi); padding:6px 4px; cursor:pointer; }
+.kuyruk li:hover { background:#fff; }
+.kuyruk .ust { display:flex; gap:6px; align-items:center; font-size:13px; }
+.kuyruk .baglam { font-size:18px; line-height:1.7; overflow-wrap:anywhere; }
+.kuyruk mark { background:#f3d98b; padding:0 2px; }
+.kuyruk .ipucu .ar { font-size:16px; }
 #durum { position:fixed; left:14px; bottom:14px; background:var(--yazi); color:#fff; padding:6px 12px; border-radius:4px;
          font-size:13px; display:none; z-index:20; max-width:70vw; }
 #durum.hata { background:var(--kirmizi); }
@@ -110,6 +135,8 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
     <span id="sayfaSayisi" class="ipucu"></span>
     <span id="seciliSayisi" class="ipucu"></span>
     <button id="cevirDugme" class="ana">Seçilenleri çevir</button>
+    <button id="ayarDugme" title="Bu kitabın ayarları">Ayarlar</button>
+    <button class="kuyrukDugme" title="Şüpheli kelime kuyruğu">Şüpheli<span class="sayac" hidden></span></button>
     <button id="temizleDugme">Seçimi temizle</button>
     <span id="topluDurum"></span>
     <span class="bos"></span>
@@ -122,6 +149,7 @@ textarea:focus { background:#fff; box-shadow:0 0 0 1px var(--vurgu); }
     <select id="sayfaSec"></select>
     <button id="sonraki" title="Sonraki sayfa">›</button>
     <div id="ilerleme"><div id="cubuk"><i></i></div><span id="oran"></span></div>
+    <button class="kuyrukDugme" title="Şüpheli kelime kuyruğu">Şüpheli<span class="sayac" hidden></span></button>
   </div>
   <span id="harcama" class="ipucu" title="Tahmini API harcaması / bütçe sınırı"></span>
   <label><input type="file" id="dosya" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" hidden><button id="yukleDugme">Yükle</button></label>
@@ -152,7 +180,7 @@ const el = (etiket, ozellik = {}, ...cocuk) => {
   return e;
 };
 const AZAMI_SECIM = 10;
-let kitap = null, sayfa = null;
+let kitap = null, sayfa = null, hedef = null;  // hedef: sayfa açılınca gidilecek pasaj {id, secim}
 const secili = new Set(), isDurumu = {};  // isDurumu[no] = {tur: 'isleniyor'|'hata', mesaj}
 let topluCalisiyor = false;
 
@@ -257,6 +285,7 @@ async function kitapAc(id) {
   $('#kitapAdi').textContent = kitap.ad; $('#kitapAdi').title = kitap.ad;
   const islenen = kitap.sayfalar.filter(s => s.blok).length;
   $('#sayfaSayisi').textContent = `${kitap.sayfa_sayisi} sayfa · ${islenen} işlenmiş`;
+  kuyrukRozet(kitap.kuyruk);
   $('#izgara').replaceChildren(...kitap.sayfalar.map(kucukDugum));
   if (!kitap.sayfalar.length) $('#izgara').append(el('p', { className: 'ipucu', textContent: 'Bu kitapta sayfa kalmadı.' }));
   seciliGoster();
@@ -271,7 +300,7 @@ function kucukDugum(s) {
     if (islendi) location.hash = `#/kitap/${kitap.id}/sayfa/${s.id}`;
     else { kutu.checked = !kutu.checked; sec(s.no, kutu); }
   };
-  const rozet = is?.tur === 'isleniyor' ? el('span', { className: 'rozet isleniyor', textContent: 'işleniyor…' })
+  const rozet = is?.tur === 'isleniyor' ? el('span', { className: 'rozet isleniyor', textContent: is.mesaj || 'işleniyor…' })
     : is?.tur === 'hata' ? el('span', { className: 'rozet hata', textContent: 'hata' })
     : onayli ? el('span', { className: 'rozet onayli', textContent: '✓ onaylı' })
     : islendi ? el('span', { className: 'rozet islendi', textContent: s.pasaj ? `işlendi ${s.onayli}/${s.pasaj}` : 'işlendi' })
@@ -307,32 +336,45 @@ $('#cevirDugme').onclick = async () => {
   let t;
   try { t = await api(`/api/books/${kid}/estimate`, 'POST', { sayfalar: nolar }); } catch { return; }
   if (!t.islenecek) return bildir('Seçilen sayfaların hepsi zaten işlenmiş ve çevrilmiş');
-  const ozet = `${t.islenecek} sayfa ≈ ${usd(t.tahmin)} (sayfa başı ${usd(t.sayfa_basi)}${t.ortalama_defterden ? ', geçmiş ortalama' : ', varsayılan'}); bugün kalan bütçe ${usd(t.bugun_kalan)}`;
+  const ozet = `${t.islenecek} sayfa ≈ ${usd(t.tahmin)} (sayfa başı ${usd(t.sayfa_basi)}${t.ortalama_defterden ? ', geçmiş ortalama' : ', varsayılan'}`
+    + (t.cift_okuma ? `; çift okuma +${usd(t.ocr2_ek)}` : '') + `); bugün kalan bütçe ${usd(t.bugun_kalan)}`;
   if (!t.yeter) return bildir(ozet + '. Tahmin kalan bütçeyi aşıyor; iş başlatılmadı.', true);
-  if (!confirm(ozet + '.\n\nOCR ve çeviri başlatılsın mı? (Harekeleme yapılmaz.)')) return;
+  if (!confirm(ozet + '.\n\nÖnce bütün sayfaların OCR\'ı, sonra çevirileri yapılsın mı? (Harekeleme yapılmaz.)')) return;
   topluCalisiyor = true; seciliGoster();
   const durum = $('#topluDurum');
   try {
     durum.textContent = 'Sayfa görüntüleri hazırlanıyor…';
     const hazir = await api(`/api/books/${kid}/prepare`, 'POST', { sayfalar: nolar });
-    for (const s of hazir) isDurumu[s.no] = { tur: 'isleniyor' };
+    for (const s of hazir) isDurumu[s.no] = { tur: 'isleniyor', mesaj: 'sırada' };
     if (kitap?.id === kid) await kitapAc(kid);
-    let biten = 0, hatali = 0;
-    for (const s of hazir) {
-      durum.textContent = `${biten}/${hazir.length} sayfa · s. ${s.no} işleniyor…`;
-      try { await api(`/api/pages/${s.id}/process`, 'POST', null, true); delete isDurumu[s.no]; secili.delete(s.no); }
-      catch (e) {
-        hatali++; isDurumu[s.no] = { tur: 'hata', mesaj: e.message };
-        if (e.kod === 429) {  // bütçe doldu: kalan sayfaları deneme
-          for (const k of hazir) if (isDurumu[k.no]?.tur === 'isleniyor') delete isDurumu[k.no];
-          bildir(e.message, true); biten++; break;
+    const uyarilar = [], okunan = [];
+    let biten = 0, hatali = 0, durdu = false;
+    const yenile = async no => { if (kitap?.id === kid) { kitap = await api('/api/books/' + kid); kucukYenile(no); kuyrukRozet(kitap.kuyruk); } };
+    // iki aşama: önce hepsinin OCR'ı, sonra çeviri (çeviride komşu sayfaların metni bağlam olarak hazır olsun)
+    for (const [asama, liste, ad, fiil] of [['ocr', hazir, 'OCR', 'okunuyor…'], ['ceviri', okunan, 'çeviri', 'çevriliyor…']]) {
+      for (const [i, s] of liste.entries()) {
+        if (durdu) break;
+        isDurumu[s.no] = { tur: 'isleniyor', mesaj: fiil }; kucukYenile(s.no);
+        durum.textContent = `${asama === 'ocr' ? 1 : 2}/2 ${ad}: ${i}/${liste.length} sayfa · s. ${s.no} ${fiil}`;
+        try {
+          const y = await api(`/api/pages/${s.id}/process?asama=${asama}`, 'POST', null, true);
+          uyarilar.push(...y.uyarilar);
+          if (asama === 'ocr') { okunan.push(s); isDurumu[s.no] = { tur: 'isleniyor', mesaj: 'çeviri sırada' }; }
+          else { delete isDurumu[s.no]; secili.delete(s.no); biten++; }
+        } catch (e) {
+          hatali++; isDurumu[s.no] = { tur: 'hata', mesaj: e.message };
+          if (e.kod === 429) {  // bütçe doldu: kalan sayfaları deneme
+            for (const k of hazir) if (isDurumu[k.no]?.tur === 'isleniyor') delete isDurumu[k.no];
+            bildir(e.message, true); durdu = true;
+          }
         }
+        await yenile(s.no);
       }
-      biten++;
-      if (kitap?.id === kid) { kitap = await api('/api/books/' + kid); kucukYenile(s.no); }
     }
-    durum.textContent = `${biten}/${hazir.length} sayfa` + (hatali ? ` · ${hatali} hatalı` : ' · bitti');
-    if (!hatali) bildir('Toplu iş tamam');
+    durum.textContent = `${biten}/${hazir.length} sayfa bitti` + (hatali ? ` · ${hatali} hatalı` : '') + (durdu ? ' · bütçe doldu, durdu' : '')
+      + (uyarilar.length ? ` · ${uyarilar.length} uyarı` : '');
+    if (uyarilar.length && !durdu) bildir(uyarilar.join(' · '), true);
+    else if (!hatali) bildir('Toplu iş tamam');
   } catch (e) { durum.textContent = ''; console.warn(e); }
   finally { topluCalisiyor = false; if (kitap?.id === kid && !$('#kitap').hidden) await kitapAc(kid); else seciliGoster(); }
 };
@@ -344,8 +386,42 @@ async function duzenAc(kid, sid) {
   gorunum('duzen'); document.title = `s. ${sayfa.no} · ${kitap.ad}`;
   $('#kitabaDon').href = `#/kitap/${kid}`; $('#kitabaDon').textContent = '← Sayfalar';
   $('#duzenKitap').textContent = kitap.ad; $('#duzenKitap').title = kitap.ad;
-  $('#goruntu').replaceChildren(el('img', { src: `/api/pages/${sid}/image`, alt: 'sayfa ' + sayfa.no }));
-  ciz(); ozetCiz();
+  const img = el('img', { src: `/api/pages/${sid}/image`, alt: 'sayfa ' + sayfa.no });
+  img.onload = vurguKaydir;  // yüzde konumlar görüntü yüklenince gerçek yüksekliğe oturur
+  $('#goruntu').replaceChildren(el('div', { className: 'sayfaKutu' }, img, el('div', { id: 'vurgu', className: 'vurgu', hidden: true })));
+  ciz(); ozetCiz(); hedefeGit();
+}
+// OCR kutusu [ymin, xmin, ymax, xmax] (0-1000) görüntü üstünde yüzdeyle çizilir; büyütülmüş görünümde de hizalı kalır
+function vurgula(p) {
+  const v = $('#vurgu');
+  if (!v) return;
+  if (!p?.kutu) { v.hidden = true; return; }
+  const [y1, x1, y2, x2] = p.kutu;
+  Object.assign(v.style, { top: y1 / 10 + '%', left: x1 / 10 + '%', height: (y2 - y1) / 10 + '%', width: (x2 - x1) / 10 + '%' });
+  v.hidden = false; vurguKaydir();
+}
+function vurguKaydir() {
+  const g = $('#goruntu'), v = $('#vurgu');
+  if (!v || v.hidden) return;
+  // Arapça satır sağdan başlar: kutu görüntüden genişse sağ kenarı hizala
+  g.scrollTo({ top: v.offsetTop - 24, left: Math.max(v.offsetLeft - 24, v.offsetLeft + v.offsetWidth - g.clientWidth + 24), behavior: 'smooth' });
+}
+function pasajaGit(sayfaId, pasajId, secim) {  // secim: Arapça metinde seçilecek [baş, son]
+  hedef = { id: pasajId, secim };
+  if (sayfa?.id === sayfaId && !$('#duzen').hidden) hedefeGit();
+  else location.hash = `#/kitap/${kitap.id}/sayfa/${sayfaId}`;
+}
+function hedefeGit() {
+  if (!hedef) return;
+  const { id, secim } = hedef, d = document.getElementById('p' + id);
+  hedef = null;
+  if (!d) return bildir('Pasaj bu sayfada bulunamadı', true);
+  if (innerWidth < 900) $('#yan').classList.remove('acik');
+  d.style.scrollMarginTop = document.querySelector('header').offsetHeight + 8 + 'px';  // yapışkan başlığın altında kalmasın
+  d.scrollIntoView({ block: d.offsetHeight > innerHeight * .7 ? 'start' : 'center', behavior: 'smooth' });
+  d.classList.remove('parla'); void d.offsetWidth; d.classList.add('parla');
+  vurgula(sayfa.pasajlar.find(x => x.id === id));
+  if (secim) { const ar = d.querySelector('.ar'); ar.focus({ preventScroll: true }); ar.setSelectionRange(...secim); }
 }
 async function ozetYukle() { kitap = await api('/api/books/' + kitap.id); ozetCiz(); }
 function ozetCiz() {  // üst çubuk: kitabın işlenmiş sayfaları ve onay oranı
@@ -355,6 +431,7 @@ function ozetCiz() {  // üst çubuk: kitabın işlenmiş sayfaları ve onay ora
   const toplam = kitap.sayfalar.reduce((a, s) => a + s.pasaj, 0), onayli = kitap.sayfalar.reduce((a, s) => a + s.onayli, 0);
   $('#cubuk i').style.width = toplam ? (100 * onayli / toplam) + '%' : '0';
   $('#oran').textContent = toplam ? `${onayli}/${toplam} pasaj onaylı` : '';
+  kuyrukRozet(kitap.kuyruk);
 }
 const sayfaGit = id => location.hash = `#/kitap/${kitap.id}/sayfa/${id}`;
 function ciz() {
@@ -367,7 +444,18 @@ function ciz() {
       if (e.kod !== 409 || e.message.includes('işleniyor') || !confirm(e.message + ' Devam edilsin mi?')) { bildir(e.message, true); throw e; }
       sayfa = await api(`/api/pages/${sayfa.id}/ocr?zorla=true`, 'POST');
     }
-    bildir('OCR tamam'); ciz(); ozetYukle();
+    sayfa.uyarilar.length ? bildir(sayfa.uyarilar.join(' · '), true) : bildir('OCR tamam');
+    ciz(); ozetYukle(); vurgula(null);
+  });
+  const bolD = el('button', { textContent: 'Taliklere böl', title: 'Hâşiyeyi "قوله" taliklerine ayırır, lemmaları şerhte bulur (API çağrısı yok)' });
+  bolD.onclick = () => mesgul(bolD, async () => {
+    sayfa = await api(`/api/pages/${sayfa.id}/split`, 'POST');
+    const r = sayfa.rapor;
+    ciz(); ozetYukle();
+    let m = (r.bolunen ? `${r.bolunen} hâşiye bloğu bölündü · ` : 'Bölünecek yeni talik yok · ') + `${r.talik} talik, ${r.bagli} lemma şerhte bulundu`;
+    if (r.atlanan.length) m += ' · Bölünmedi: ' + r.atlanan.map(a => `pasaj ${a.sira} (${a.neden})`).join(', ')
+      + ' — emek kaybolmasın diye; bölmek için önce çeviriyi/harekelemeyi temizle ya da onayı kaldır.';
+    bildir(m, r.atlanan.length > 0);
   });
   const topluD = el('button', { textContent: 'Sayfayı çevir' });
   topluD.onclick = () => mesgul(topluD, async () => {
@@ -381,7 +469,8 @@ function ciz() {
   silD.onclick = () => confirm(`s. ${sayfa.no} ve pasajları silinsin mi?`) && mesgul(silD, async () => {
     await api('/api/pages/' + sayfa.id, 'DELETE'); sayfa = null; location.hash = `#/kitap/${kitap.id}`;
   });
-  arac.replaceChildren(ocrD, sayfa.pasajlar.length ? topluD : null, silD,
+  arac.replaceChildren(ocrD, sayfa.pasajlar.length ? topluD : null,
+    sayfa.pasajlar.some(p => p.tur === 'hasiye') ? bolD : null, silD,
     el('span', { className: 'ipucu', textContent: 'Ctrl+Enter: onayla ve sonrakine geç' }));
   kutu.replaceChildren(...sayfa.pasajlar.map(pasajDugumu));
   if (!sayfa.pasajlar.length) kutu.append(el('p', { className: 'ipucu', textContent: 'Bu sayfa henüz OCR\'lanmadı.' }));
@@ -389,7 +478,7 @@ function ciz() {
 }
 function degistir(p) {  // sunucudan gelen pasajı yerine koy, yalnızca o satırı yeniden çiz
   const i = sayfa.pasajlar.findIndex(x => x.id === p.id);
-  sayfa.pasajlar[i] = p;
+  p = sayfa.pasajlar[i] = { ...sayfa.pasajlar[i], ...p };  // talik bağları yalnız sayfa yanıtında gelir; korunsun
   const eski = document.getElementById('p' + p.id), yeni = pasajDugumu(p);
   eski.replaceWith(yeni); yeni.querySelectorAll('textarea').forEach(boyla);
   return yeni;
@@ -404,7 +493,7 @@ function pasajDugumu(p) {
   const ar = el('textarea', { className: 'ar', value: p.ar, rows: 1, spellcheck: false });
   const tr = el('textarea', { className: 'tr', value: p.tr, rows: 1, placeholder: p.tur === 'diger' ? '' : 'Çeviri…', lang: 'tr' });
   ar.oninput = () => boyla(ar); tr.oninput = () => boyla(tr);
-  ar.onchange = () => ar.value.trim() ? kaydet(p, { ar: ar.value.trim() }) : (ar.value = p.ar);
+  ar.onchange = () => ar.value.trim() ? kaydet(p, { ar: ar.value.trim() }).then(() => { ozetYukle(); if ($('#yan').dataset.tur === 'kuyruk') kuyrukAc(); }) : (ar.value = p.ar);
   tr.onchange = () => kaydet(p, { tr: tr.value });
   const onayla = async sonrakineGec => {
     const onayli = p.durum !== 'onayli' || sonrakineGec;
@@ -419,7 +508,7 @@ function pasajDugumu(p) {
   tr.onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); tr.onchange = null; onayla(true).catch(() => {}); } };
   const dugme = (yazi, yol, bekle) => {
     const d = el('button', { textContent: yazi });
-    d.onclick = () => mesgul(d, async () => { bildir(bekle); degistir(await api(`/api/passages/${p.id}/${yol}`, 'POST')); bildir(''); });
+    d.onclick = () => mesgul(d, async () => { bildir(bekle); degistir(await api(`/api/passages/${p.id}/${yol}`, 'POST')); bildir(''); ozetYukle(); });
     return d;
   };
   const oneriKutu = el('div');
@@ -449,15 +538,35 @@ function pasajDugumu(p) {
       : el('span', { className: 'kirmizi', textContent: '⚠ harf değişti: ' + r.farklar.slice(0, 6).join(' | ') });
     arHucre.append(el('div', { className: 'not' }, rozet, el('div', { className: 'harekeli', textContent: p.ar_vocalized })));
   }
+  if (p.supheli.length) arHucre.append(el('div', { className: 'not sari' }, 'Çift okuma farkı: ',
+    ...p.supheli.flatMap((m, i) => [i ? ' · ' : '', el('span', { className: 'ar', textContent: m.kelime }), ' ikinci okumada ',
+      m.diger ? el('span', { className: 'ar', textContent: m.diger }) : 'yok'])));
   const trHucre = el('div', { className: 'h' }, tr);
   if (p.sapma.length) trHucre.append(el('div', { className: 'not sari', textContent: 'Sözlük sapması: ' + p.sapma.map(t => `${t.ar} → ${t.tr}`).join(' · ') }));
   trHucre.append(oneriKutu);
-  return el('section', { id: 'p' + p.id, className: `pasaj ${p.tur} ${p.durum}` },
-    el('div', { className: 'ust' }, tur, el('span', { className: 'bos' }),
+  let lemma = null, etiketler = null;
+  if (p.lemma) {  // talik: lemma ve bağlı şerh pasajına git
+    const git = p.bagli_id ? el('a', { href: '#', textContent: 'şerhte göster', title: 'Lemmanın geçtiği şerh pasajına git' }) : null;
+    if (git) git.onclick = e => { e.preventDefault(); e.stopPropagation(); pasajaGit(p.bagli_sayfa, p.bagli_id); };
+    lemma = [el('span', { className: 'lemma', textContent: p.lemma, title: 'Talikin lemması (şerhten alıntı)' }),
+             git || el('span', { className: 'ipucu', textContent: 'şerhte bulunamadı' })];
+  }
+  if (p.talikler?.length) {
+    etiketler = el('div', { className: 'etiketler' }, 'Talikler:', ...p.talikler.map(t => {
+      const b = el('button', { className: 'etiket', textContent: t.lemma, title: 'Talike git' });
+      b.onclick = e => { e.stopPropagation(); pasajaGit(t.page_id, t.id); };
+      return b;
+    }));
+  }
+  const bolum = el('section', { id: 'p' + p.id, className: `pasaj ${p.tur} ${p.durum}` },
+    el('div', { className: 'ust' }, tur, ...(lemma || []), el('span', { className: 'bos' }),
       metin ? dugme('Çevir', 'translate', 'Çevriliyor…') : null,
       metin ? dugme(p.ar_vocalized ? 'Yeniden harekele' : 'Harekele', 'vocalize', 'Harekeleniyor…') : null,
       metin ? agentD : null, metin ? onayD : null),
-    arHucre, trHucre);
+    arHucre, trHucre, etiketler);
+  bolum.addEventListener('focusin', () => vurgula(p));
+  bolum.addEventListener('click', () => vurgula(p));
+  return bolum;
 }
 
 // ---- üst çubuk ----
@@ -467,7 +576,7 @@ const kaydir = yon => {
   if (liste[i]) sayfaGit(liste[i]);
 };
 $('#onceki').onclick = () => kaydir(-1); $('#sonraki').onclick = () => kaydir(1);
-$('#goruntu').onclick = () => $('#goruntu').classList.toggle('buyuk');
+$('#goruntu').onclick = () => { $('#goruntu').classList.toggle('buyuk'); vurguKaydir(); };
 $('#yukleDugme').onclick = () => $('#dosya').click();
 $('#dosya').onchange = async e => {
   if (!e.target.files.length) return;
@@ -484,7 +593,56 @@ $('#dosya').onchange = async e => {
 const yanAc = (baslik, ...icerik) => {
   const kapat = el('button', { textContent: '×' }); kapat.onclick = () => $('#yan').classList.remove('acik');
   $('#yan').replaceChildren(el('h2', {}, baslik, el('span', { className: 'bos' }), kapat), ...icerik); $('#yan').classList.add('acik');
+  $('#yan').dataset.tur = '';
 };
+// ---- kitap ayarları: yeni ayar buraya bir satır olarak eklenir (sunucuda app.AYARLAR) ----
+const AYAR_TANIM = [
+  { ad: 'talik_bol', baslik: 'Hâşiyeyi taliklere böl',
+    aciklama: 'OCR\'dan sonra hâşiye blokları "قوله" ile başlayan taliklere ayrılır, lemmaları şerhte bulunup bağlanır. API çağrısı yapmaz.' },
+  { ad: 'cift_okuma', baslik: 'Çift okuma',
+    aciklama: 'Sayfa ikinci bir modelle de okunur; ayrışan kelimeler şüpheli kuyruğuna düşer. Birincil okuma esas alınır. OCR maliyetini artırır: her sayfada ikinci bir OCR çağrısı yapılır.' },
+];
+$('#ayarDugme').onclick = () => {
+  const satirlar = AYAR_TANIM.map(t => {
+    const kutu = el('input', { type: 'checkbox', checked: !!kitap.ayar[t.ad] });
+    kutu.onchange = async () => {
+      kutu.disabled = true;
+      try { kitap.ayar = (await api('/api/books/' + kitap.id, 'PATCH', { ayar: { [t.ad]: kutu.checked } })).ayar; bildir('Ayar kaydedildi'); }
+      catch { kutu.checked = !kutu.checked; } finally { kutu.disabled = false; }
+    };
+    return el('label', { className: 'ayar' }, kutu, el('span', {}, el('b', { textContent: t.baslik }), el('small', { className: 'ipucu', textContent: t.aciklama })));
+  });
+  yanAc('Kitap ayarları', el('p', { className: 'ipucu', textContent: `"${kitap.ad}" için geçerlidir; hepsi varsayılan olarak kapalıdır.` }), ...satirlar);
+};
+// ---- şüpheli kelime kuyruğu ----
+function kuyrukRozet(n) {
+  for (const s of document.querySelectorAll('.kuyrukDugme .sayac')) { s.textContent = n; s.hidden = !n; }
+}
+async function kuyrukAc() {
+  const liste = await api(`/api/books/${kitap.id}/queue`);
+  kuyrukRozet(liste.length);
+  const TUR = { okunamadi: 'okunamadı', hareke: 'harekelemede harf değişimi', cift: 'çift okuma farkı' };
+  const satirlar = liste.map(m => {
+    const kapat = el('button', { textContent: 'Baktım', title: 'Maddeyi kalıcı olarak kapat' });
+    const satir = el('li', { title: 'Pasaja git' },
+      el('div', { className: 'ust' }, el('span', { textContent: `s. ${m.no} · ${{ serh: 'Şerh', hasiye: 'Hâşiye' }[m.katman]} · ${TUR[m.tur]}` }),
+        el('span', { className: 'bos' }), kapat),
+      el('div', { className: 'ar baglam' }, m.once && m.once + ' ', el('mark', { textContent: m.kelime }), m.sonra && ' ' + m.sonra),
+      m.tur === 'okunamadi' ? null : el('div', { className: 'ipucu' }, m.tur === 'cift' ? 'İkinci okuma: ' : 'Harekelemede: ',
+        el('span', { className: 'ar', textContent: m.diger || '(yok)' })));
+    kapat.onclick = e => {
+      e.stopPropagation();
+      mesgul(kapat, async () => { kuyrukRozet((await api(`/api/passages/${m.passage_id}/dismiss`, 'POST', { anahtar: m.anahtar })).kalan); satir.remove(); });
+    };
+    satir.onclick = () => pasajaGit(m.page_id, m.passage_id, [m.bas, m.son]);
+    return satir;
+  });
+  yanAc(`Şüpheli kelimeler (${liste.length})`,
+    el('p', { className: 'ipucu', textContent: 'OCR\'ın okuyamadığı [?] işaretleri, harekelemedeki harf değişimleri ve çift okuma farkları. Tıklayınca pasaja gider; metin düzeltilince madde kendiliğinden düşer.' }),
+    liste.length ? el('ul', { className: 'kuyruk' }, ...satirlar) : el('p', { textContent: 'Kuyruk boş.' }));
+  $('#yan').dataset.tur = 'kuyruk';
+}
+for (const d of document.querySelectorAll('.kuyrukDugme')) d.onclick = () => mesgul(d, kuyrukAc);
 $('#sozlukDugme').onclick = async () => {
   const ar = el('input', { placeholder: 'Arapça terim', dir: 'rtl', className: 'ar' }), tr = el('input', { placeholder: 'Türkçe karşılık' });
   const tablo = el('table');

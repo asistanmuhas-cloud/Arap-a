@@ -9,22 +9,25 @@ görüntüleri); ARAPCA_VERI ile değiştirilebilir. Bütçe: GUNLUK_BUTCE_USD (
 """
 import io
 import json
+import math
 import os
 import re
 import shutil
 import sqlite3
 import threading
 from contextlib import closing, contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 import llm as llm_modul
-from arapca_test import CEVIRI_PROMPT, HAREKE_PROMPT, OCR_PROMPT, OCR_SCHEMA, imla, parcali, rasm, rasm_kontrol
+from arapca_test import (CEVIRI_PROMPT, HAREKE, HAREKE_PROMPT, IMLA, OCR_PROMPT, OCR_SCHEMA, imla, parcali, rasm,
+                         rasm_kontrol)
 
 KOK = Path(__file__).parent
 VERI = Path(os.environ.get("ARAPCA_VERI", KOK / "data"))
@@ -35,17 +38,23 @@ KUCUK_GENISLIK = 240  # küçük resim genişliği (piksel)
 GUNLUK_BUTCE = float(os.environ.get("GUNLUK_BUTCE_USD", "3"))
 AYLIK_BUTCE = float(os.environ.get("AYLIK_BUTCE_USD", "30"))
 VARSAYILAN_SAYFA_MALIYETI = 0.10  # USD; defterde geçmiş sayfa yoksa tahmin için
+VARSAYILAN_OCR2_MALIYETI = 0.03  # USD; çift okumanın ikinci okuması için, defterde geçmiş yoksa
+BAGLAM = 300  # komşu sayfadan çeviri isteğine eklenen bağlam (karakter)
+AZAMI_LEMMA = 100  # talik lemması (قوله ... ")") en fazla bu kadar karakter
+AZAMI_FARK = 4  # çift okumada bundan uzun ayrışma kelime farkı değil blok/katman kaymasıdır; sayılmaz
+AYARLAR = {"talik_bol": False, "cift_okuma": False}  # kitap ayarları (books.ayar JSON) ve varsayılanları
 
 SEMA = """
 CREATE TABLE IF NOT EXISTS books(
     id INTEGER PRIMARY KEY, ad TEXT NOT NULL, dosya TEXT, sayfa_sayisi INTEGER NOT NULL,
-    olusturma TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+    olusturma TEXT NOT NULL DEFAULT (datetime('now','localtime')), ayar TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS pages(
     id INTEGER PRIMARY KEY, no INTEGER NOT NULL, dosya TEXT NOT NULL, book_id INTEGER REFERENCES books(id));
 CREATE TABLE IF NOT EXISTS passages(
     id INTEGER PRIMARY KEY, page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
     sira INTEGER NOT NULL, tur TEXT NOT NULL, ar TEXT NOT NULL, ar_vocalized TEXT,
-    tr TEXT NOT NULL DEFAULT '', durum TEXT NOT NULL DEFAULT 'taslak');
+    tr TEXT NOT NULL DEFAULT '', durum TEXT NOT NULL DEFAULT 'taslak',
+    kutu TEXT, lemma TEXT, bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL, supheli TEXT, kapali TEXT);
 CREATE TABLE IF NOT EXISTS glossary(
     id INTEGER PRIMARY KEY, ar TEXT NOT NULL UNIQUE, tr TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usage(
@@ -56,6 +65,9 @@ CREATE INDEX IF NOT EXISTS usage_zaman ON usage(zaman);
 """
 # books.dosya: VERI/kitap altındaki PDF yolu; görüntülerden oluşan kitapta NULL (sayfaları yüklenince oluşur).
 # pages.no: kitaptaki (PDF'teki) sayfa numarası. usage satırları kitap silinse de kalır (bütçe hesabı için).
+# passages.kutu: OCR'ın verdiği konum, JSON [ymin, xmin, ymax, xmax] (0-1000). lemma: talikte "قوله"den sonraki
+# şerh alıntısı; bagli_id: lemmanın bulunduğu şerh pasajı. supheli: çift okumada ayrışan kelimeler, JSON
+# [{kelime, diger, i}] (i: kelimenin pasajdaki sırası). kapali: şüpheli kuyruğunda "baktım" denen maddelerin anahtarları.
 
 AGENT_PROMPT = """Aşağıda klasik Hanefî fıkıh metninden bir Arapça pasaj ve Türkçe çevirisi var.
 Çeviriyi asılla karşılaştır; yalnızca gerçek sorunlar için düzeltme öner: yanlış anlam, atlanmış ifade,
@@ -83,10 +95,19 @@ ISLEM_KILIDI = threading.Lock()  # aynı anda tek sayfa işleme (çift tıklama/
 
 
 # ---------- veri katmanı ----------
+def sutun_ekle(c: sqlite3.Connection, tablo: str, *tanimlar: str):
+    var = {r["name"] for r in c.execute(f"PRAGMA table_info({tablo})")}
+    for t in tanimlar:
+        if t.split()[0] not in var:
+            c.execute(f"ALTER TABLE {tablo} ADD COLUMN {t}")
+
+
 def gec(c: sqlite3.Connection):
-    """Eski şemadan göç: pages.book_id yoksa ekler, sahipsiz sayfaları 'Eski sayfalar' kitabına bağlar."""
-    if "book_id" not in [r["name"] for r in c.execute("PRAGMA table_info(pages)")]:
-        c.execute("ALTER TABLE pages ADD COLUMN book_id INTEGER REFERENCES books(id)")
+    """Eski şemadan göç: eksik sütunları ekler, sahipsiz sayfaları 'Eski sayfalar' kitabına bağlar."""
+    sutun_ekle(c, "pages", "book_id INTEGER REFERENCES books(id)")
+    sutun_ekle(c, "books", "ayar TEXT NOT NULL DEFAULT '{}'")
+    sutun_ekle(c, "passages", "kutu TEXT", "lemma TEXT", "bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL",
+               "supheli TEXT", "kapali TEXT")
     sahipsiz = [r["id"] for r in c.execute("SELECT id FROM pages WHERE book_id IS NULL ORDER BY no, id")]
     if sahipsiz:
         bid = c.execute("INSERT INTO books(ad, sayfa_sayisi) VALUES('Eski sayfalar', ?)", (len(sahipsiz),)).lastrowid
@@ -207,11 +228,259 @@ def sozluk_metni(ar: str) -> str:
     return "Terim sözlüğü (bu karşılıkları kullan):\n" + "\n".join(f"- {t['ar']} = {t['tr']}" for t in terimler) + "\n"
 
 
+def json_oku(ham, bos):
+    try:
+        return json.loads(ham) if ham else bos
+    except ValueError:
+        return bos
+
+
+def ayar_coz(ham) -> dict:
+    kayitli = json_oku(ham, {})
+    kayitli = kayitli if isinstance(kayitli, dict) else {}
+    return {k: bool(kayitli.get(k, v)) for k, v in AYARLAR.items()}
+
+
+def kitap_ayari(bid: int) -> dict:
+    return ayar_coz(bul("books", bid)["ayar"])
+
+
+def kutu_dogrula(k) -> Optional[list]:
+    """Gemini kutusu [ymin, xmin, ymax, xmax], 0-1000 arası normalize; geçersizse None (pasaj yine kaydedilir)."""
+    if not isinstance(k, list) or len(k) != 4:
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in k):
+        return None
+    k = [round(v) for v in k]
+    if not all(0 <= v <= 1000 for v in k) or k[0] >= k[2] or k[1] >= k[3]:
+        return None
+    return k
+
+
+def oz(metin: str) -> str:
+    """Karşılaştırma için iskelet: harekesiz, imla farkı ve noktalama/boşluk gözetmeden."""
+    return re.sub(r"\W", "", imla(rasm(metin)))
+
+
+def kelime_araligi(metin: str, bas: int, son: int) -> tuple:
+    """[bas, son) karakter aralığını kapsayan kelimelerin [başı, sonu)."""
+    kel = [m.span() for m in re.finditer(r"\S+", metin)] or [(0, len(metin))]
+    ilk = next((i for i, (_, b) in enumerate(kel) if b > bas), len(kel) - 1)
+    son_k = max([i for i, (a, _) in enumerate(kel) if a < max(son, bas + 1)] + [ilk])
+    return kel[ilk][0], kel[son_k][1]
+
+
+# ---------- çift okuma ----------
+def okuma_karsilastir(birincil: list, ikincil: list) -> dict:
+    """Katman bazında kelime düzeyinde hizalama; iki modelin blok sınırları farklı olabileceği için katmanın bütün
+    metni birleştirilir. {birincil blok sırası: [{"kelime", "diger", "i"}]}; diger "" ise ikinci okumada yok."""
+    sonuc = {}
+    for katman in ("serh", "hasiye"):
+        a = [(bi, wi, k) for bi, b in enumerate(birincil) if b["tur"] == katman
+             for wi, k in enumerate(b["metin"].split()) if oz(k)]
+        b = [k for x in ikincil if x["tur"] == katman for k in x["metin"].split() if oz(k)]
+        if not a or not b:
+            continue
+        sm = SequenceMatcher(None, [oz(x[2]) for x in a], [oz(k) for k in b], autojunk=False)
+        for op, i1, i2, j1, j2 in sm.get_opcodes():
+            if op == "equal" or max(i2 - i1, j2 - j1) > AZAMI_FARK:
+                continue
+            diger = " ".join(b[j1:j2])
+            if op == "insert":  # ikinci okumada fazladan kelime: komşu kelimeye bağla
+                bi, wi, k = a[i1 - 1] if i1 else a[0]
+                sonuc.setdefault(bi, []).append({"kelime": k, "diger": f"{k} {diger}" if i1 else f"{diger} {k}", "i": wi})
+                continue
+            for bi, wi, k in a[i1:i2]:
+                sonuc.setdefault(bi, []).append({"kelime": k, "diger": diger, "i": wi})
+    return sonuc
+
+
+def supheli_gecerli(p: dict) -> list:
+    """Saklanan çift okuma farklarından metinde hâlâ duranlar; kelime yer değiştirdiyse en yakın geçişe taşınır."""
+    kel = p["ar"].split()
+    sonuc = []
+    for m in json_oku(p.get("supheli"), []):
+        yerler = [i for i, k in enumerate(kel) if k == m.get("kelime")]
+        if yerler:
+            sonuc.append({**m, "i": min(yerler, key=lambda i: abs(i - m.get("i", 0)))})
+    return sonuc
+
+
+# ---------- hâşiyeyi taliklere bölme (LLM yok) ----------
+_H = "[\u064b-\u0652\u0670\u0640]*"
+KAVL = re.compile(rf"(?<!\S)ق{_H}و{_H}ل{_H}ه{_H}(?!\S)")  # bağımsız kelime olarak "قوله" (بقوله/لقوله/وقوله değil)
+KISALTMA = re.compile(r"(?<!\S)(?:الخ|[اإ]لى آخره)(?!\S)")
+
+
+def talik_parcala(metin: str) -> list:
+    """Hâşiye bloğunu taliklere ayırır: [(baş, son, lemma|None)]. Talik "قوله <alıntı> )" ile başlar; alıntı kısa,
+    parantezsiz ve içinde başka "قوله" yoksa bölünür, emin olunamayan yerde bölünmez. Baştaki "قوله"siz parça
+    (önceki sayfadan devam) lemmasız ayrı parça olur. Bölünecek yer yoksa boş liste."""
+    kesim = []
+    for m in KAVL.finditer(metin):
+        kapanis = metin.find(")", m.end())
+        lemma = metin[m.end():kapanis].strip().lstrip("(").strip() if kapanis > 0 else ""
+        if lemma and len(lemma) <= AZAMI_LEMMA and "(" not in lemma and not KAVL.search(lemma):
+            kesim.append((m.start(), lemma))
+    if not kesim:
+        return []
+    parcalar = [(0, kesim[0][0], None)] if metin[:kesim[0][0]].strip() else []
+    sinirlar = [b for b, _ in kesim] + [len(metin)]
+    return parcalar + [(b, sinirlar[i + 1], lemma) for i, (b, lemma) in enumerate(kesim)]
+
+
+def lemma_bul(lemma: str, gruplar: list) -> Optional[int]:
+    """Lemmayı ("الخ" öncesi) şerh pasajlarında harekesiz/imla farkı gözetmeden arar; gruplar öncelik sırasıyla
+    (aynı sayfa, önceki sayfa). Tamamı bulunamazsa sondan kısaltarak (en az iki kelime) dener."""
+    kelimeler = KISALTMA.split(lemma)[0].split()
+    for n in range(len(kelimeler), min(2, len(kelimeler)) - 1, -1):
+        hedef = oz(" ".join(kelimeler[:n]))
+        for grup in gruplar:
+            for p in grup:
+                if hedef and hedef in oz(p["ar"]):
+                    return p["id"]
+    return None
+
+
+def talik_bol(pid: int) -> dict:
+    """Sayfanın hâşiye pasajlarını taliklere böler ve lemmaları şerhe bağlar. Çevirisi, harekelemesi olan ya da
+    onaylı pasaj bölünmez (emek kaybolmasın); yalnızca tek talikse lemması işaretlenir."""
+    s = bul("pages", pid)
+    pasajlar = sor("SELECT * FROM passages WHERE page_id=? ORDER BY sira", pid)
+    sira, atlanan, bolunen = [], [], 0
+    with closing(db()) as c, c:
+        for p in pasajlar:
+            parcalar = talik_parcala(p["ar"]) if p["tur"] == "hasiye" else []
+            if len(parcalar) > 1 and (p["tr"].strip() or p["durum"] == "onayli" or p["ar_vocalized"]):
+                neden = "onaylı" if p["durum"] == "onayli" else "çevirisi var" if p["tr"].strip() else "harekelenmiş"
+                atlanan.append({"sira": p["sira"] + 1, "neden": neden})
+                parcalar = []
+            if len(parcalar) == 1:
+                c.execute("UPDATE passages SET lemma=? WHERE id=?", (parcalar[0][2], p["id"]))
+            if len(parcalar) <= 1:
+                sira.append(p["id"])
+                continue
+            bolunen += 1
+            supheli = json_oku(p["supheli"], [])
+            for n, (bas, son, lemma) in enumerate(parcalar):
+                kayma = len(p["ar"][:bas].split())  # bölme kelime başında olur; kelime sırası kayar
+                adet = len(p["ar"][bas:son].split())
+                ps = [{**m, "i": m["i"] - kayma} for m in supheli if kayma <= m.get("i", -1) < kayma + adet]
+                alan = (p["ar"][bas:son].strip(), lemma, json.dumps(ps, ensure_ascii=False) if ps else None)
+                if n == 0:  # ilk parça pasajın kimliğini korur
+                    c.execute("UPDATE passages SET ar=?, lemma=?, supheli=? WHERE id=?", (*alan, p["id"]))
+                    sira.append(p["id"])
+                else:
+                    sira.append(c.execute("INSERT INTO passages(page_id, sira, tur, ar, lemma, supheli, kutu, kapali) "
+                                          "VALUES(?,?,?,?,?,?,?,?)", (pid, -1, "hasiye", *alan, p["kutu"],
+                                                                     p["kapali"])).lastrowid)
+        c.executemany("UPDATE passages SET sira=? WHERE id=?", [(i, k) for i, k in enumerate(sira)])
+        serh = lambda sid: [dict(r) for r in c.execute("SELECT id, ar FROM passages WHERE page_id=? AND tur='serh' "
+                                                       "ORDER BY sira", (sid,))]
+        onceki = c.execute("SELECT id FROM pages WHERE book_id=? AND no=?", (s["book_id"], s["no"] - 1)).fetchone()
+        gruplar = [serh(pid), serh(onceki["id"]) if onceki else []]
+        talikler = c.execute("SELECT id, lemma FROM passages WHERE page_id=? AND tur='hasiye' AND lemma IS NOT NULL",
+                             (pid,)).fetchall()
+        baglar = [(lemma_bul(t["lemma"], gruplar), t["id"]) for t in talikler]
+        c.executemany("UPDATE passages SET bagli_id=? WHERE id=?", baglar)
+    return {"talik": len(talikler), "bolunen": bolunen, "bagli": sum(1 for b, _ in baglar if b),
+            "atlanan": atlanan}
+
+
+# ---------- şüpheli kelime kuyruğu ----------
+def iskelet_harita(metin: str) -> tuple:
+    """imla(rasm(metin)) ve her harfinin metindeki konumu (rasm_kontrol'ün karşılaştırdığı dizi)."""
+    konum = [i for i, h in enumerate(metin) if not HAREKE.match(h) and not h.isspace()]
+    return "".join(metin[i] for i in konum).translate(IMLA), konum
+
+
+def harf_farklari(kaynak: str, harekeli: str) -> list:
+    """Harekelemenin yaptığı gerçek harf değişimleri (imla farkları değil): [(baş, son, harekelideki kelime)]."""
+    x, kx = iskelet_harita(kaynak)
+    y, ky = iskelet_harita(harekeli)
+    sonuc = []
+    for op, i1, i2, j1, j2 in SequenceMatcher(None, x, y, autojunk=False).get_opcodes():
+        if op == "equal" or not kx:
+            continue
+        bas = kx[min(i1, len(kx) - 1)] if i2 > i1 else kx[max(i1 - 1, 0)]
+        son = kx[i2 - 1] + 1 if i2 > i1 else bas + 1
+        diger = harekeli[slice(*kelime_araligi(harekeli, ky[j1], ky[j2 - 1] + 1))] if j2 > j1 else ""
+        sonuc.append((bas, son, diger))
+    return sonuc
+
+
+def kuyruk_maddeleri(p: dict) -> list:
+    """Pasajın açık şüpheli maddeleri: okunamayan "[?]", harekelemedeki harf değişimi, çift okuma farkı."""
+    ar, kapali = p["ar"], set(json_oku(p.get("kapali"), []))
+    kel = [m.span() for m in re.finditer(r"\S+", ar)]
+    adaylar = [("okunamadi", m.start(), m.end(), "") for m in re.finditer(r"\[\?\]", ar)]
+    if p["ar_vocalized"] and not rasm_kontrol(ar, p["ar_vocalized"])["imla"]:
+        adaylar += [("hareke", *f) for f in harf_farklari(ar, p["ar_vocalized"])]
+    adaylar += [("cift", *kel[m["i"]], m["diger"]) for m in supheli_gecerli(p)]
+    maddeler, gorulen = [], set()
+    for tur, bas, son, diger in adaylar:
+        bas, son = kelime_araligi(ar, bas, son)
+        i = next(n for n, (a, b) in enumerate(kel) if b > bas)
+        j = max(n for n, (a, b) in enumerate(kel) if a < son)
+        once = ar[kel[max(i - 3, 0)][0]:bas].strip() if i else ""
+        sonra = ar[son:kel[min(j + 3, len(kel) - 1)][1]].strip()
+        anahtar = "|".join([tur, once, ar[bas:son], sonra, diger])
+        if anahtar in kapali or anahtar in gorulen:
+            continue
+        gorulen.add(anahtar)
+        maddeler.append({"tur": tur, "kelime": ar[bas:son], "once": once, "sonra": sonra, "diger": diger,
+                         "bas": bas, "son": son, "anahtar": anahtar})
+    return maddeler
+
+
+def kuyruk(bid: int) -> list:
+    pasajlar = sor("""SELECT pg.no, p.* FROM passages p JOIN pages pg ON pg.id=p.page_id
+                      WHERE pg.book_id=? AND p.tur!='diger'
+                        AND (p.ar LIKE '%[?]%' OR p.ar_vocalized IS NOT NULL OR p.supheli IS NOT NULL)
+                      ORDER BY pg.no, p.sira""", bid)
+    return [{"no": p["no"], "page_id": p["page_id"], "passage_id": p["id"], "katman": p["tur"], **m}
+            for p in pasajlar for m in kuyruk_maddeleri(p)]
+
+
+# ---------- sayfalar arası devam ----------
+BAGLAM_PROMPT = """Komşu sayfa bağlamı — YALNIZCA BAĞLAM, ÇEVİRME ve çıktına koyma. Çevrilecek metin önceki sayfanın
+sonundan devam ediyor ya da sonraki sayfada sürüyor olabilir; sayfa sınırında yarım kalan cümleyi bu bağlama göre
+tutarlı çevir, ama yalnızca aşağıdaki asıl metni çevir.
+{bolumler}--- bağlam sonu ---
+
+"""
+
+
+def komsu_baglam(p: dict) -> str:
+    """Pasaj sayfadaki katmanının ilk/son pasajıysa komşu sayfanın aynı katmandaki son/ilk pasajından ~300 karakter."""
+    if p["tur"] not in ("serh", "hasiye"):
+        return ""
+    s = bul("pages", p["page_id"])
+    ayni = [x["id"] for x in sor("SELECT id FROM passages WHERE page_id=? AND tur=? ORDER BY sira", s["id"], p["tur"])]
+
+    def komsu(no: int, sondan: bool) -> str:
+        r = sor(f"""SELECT p.ar FROM passages p JOIN pages pg ON pg.id=p.page_id WHERE pg.book_id=? AND pg.no=?
+                    AND p.tur=? ORDER BY p.sira {'DESC' if sondan else ''} LIMIT 1""", s["book_id"], no, p["tur"])
+        return r[0]["ar"] if r else ""
+
+    once = komsu(s["no"] - 1, True) if ayni and ayni[0] == p["id"] else ""
+    sonra = komsu(s["no"] + 1, False) if ayni and ayni[-1] == p["id"] else ""
+    if len(once) > BAGLAM:
+        once = once[-BAGLAM:].split(" ", 1)[-1]
+    if len(sonra) > BAGLAM:
+        sonra = sonra[:BAGLAM].rsplit(" ", 1)[0]
+    bolumler = (f"[Önceki sayfanın sonu]\n{once}\n" if once else "") + (f"[Sonraki sayfanın başı]\n{sonra}\n" if sonra else "")
+    return BAGLAM_PROMPT.format(bolumler=bolumler) if bolumler else ""
+
+
 def zengin(p: dict) -> dict:
-    """Pasaja hesaplanan alanları ekler: rasm kontrolü ve sözlük sapmaları."""
+    """Pasaja hesaplanan alanları ekler: rasm kontrolü, sözlük sapmaları, kutu ve geçerli çift okuma farkları."""
     p["rasm"] = rasm_kontrol(p["ar"], p["ar_vocalized"]) if p["ar_vocalized"] else None
     p["sapma"] = ([t for t in sozluk_eslesen(p["ar"]) if tr_kucuk(t["tr"]) not in tr_kucuk(p["tr"])]
                   if p["tr"].strip() else [])
+    p["kutu"] = json_oku(p["kutu"], None)
+    p["supheli"] = supheli_gecerli(p)
+    p["kapali"] = json_oku(p["kapali"], [])
     return p
 
 
@@ -275,14 +544,14 @@ async def yukle(dosyalar: list[UploadFile]):
 
 @app.get("/api/books")
 def kitaplar():
-    return sor("""SELECT b.*,
+    return [{**b, "ayar": ayar_coz(b["ayar"])} for b in sor("""SELECT b.*,
         (SELECT COUNT(*) FROM pages pg WHERE pg.book_id=b.id
             AND EXISTS(SELECT 1 FROM passages WHERE page_id=pg.id)) AS islenen,
         (SELECT COUNT(*) FROM passages p JOIN pages pg ON pg.id=p.page_id WHERE pg.book_id=b.id AND p.tur!='diger') AS pasaj,
         (SELECT COUNT(*) FROM passages p JOIN pages pg ON pg.id=p.page_id
             WHERE pg.book_id=b.id AND p.tur!='diger' AND p.durum='onayli') AS onayli,
         (SELECT COALESCE(SUM(maliyet), 0) FROM usage WHERE book_id=b.id) AS maliyet
-        FROM books b ORDER BY b.id DESC""")
+        FROM books b ORDER BY b.id DESC""")]
 
 
 @app.get("/api/books/{bid}")
@@ -292,20 +561,30 @@ def kitap(bid: int):
     nolar = range(1, k["sayfa_sayisi"] + 1) if k["dosya"] else sorted(satirlar)
     k["sayfalar"] = [satirlar.get(n) or {"id": None, "no": n, "blok": 0, "pasaj": 0, "onayli": 0, "cevrilmemis": 0}
                      for n in nolar]
+    k["ayar"] = ayar_coz(k["ayar"])
+    k["kuyruk"] = len(kuyruk(bid))
     return k
 
 
 class KitapGuncelle(BaseModel):
-    ad: str = Field(min_length=1, max_length=200)
+    ad: Optional[str] = Field(None, min_length=1, max_length=200)
+    ayar: Optional[dict[str, StrictBool]] = None  # yalnızca verilen ayarlar değişir
 
 
 @app.patch("/api/books/{bid}")
 def kitap_guncelle(bid: int, g: KitapGuncelle):
-    bul("books", bid)
-    if not g.ad.strip():
-        raise HTTPException(422, "Kitap adı boş olamaz")
-    yaz("UPDATE books SET ad=? WHERE id=?", g.ad.strip(), bid)
-    return bul("books", bid)
+    k = bul("books", bid)
+    if g.ad is not None:
+        if not g.ad.strip():
+            raise HTTPException(422, "Kitap adı boş olamaz")
+        yaz("UPDATE books SET ad=? WHERE id=?", g.ad.strip(), bid)
+    if g.ayar is not None:
+        bilinmeyen = set(g.ayar) - set(AYARLAR)
+        if bilinmeyen:
+            raise HTTPException(422, f"Bilinmeyen ayar: {', '.join(sorted(bilinmeyen))}")
+        yaz("UPDATE books SET ayar=? WHERE id=?", json.dumps({**ayar_coz(k["ayar"]), **g.ayar}), bid)
+    k = bul("books", bid)
+    return {**k, "ayar": ayar_coz(k["ayar"])}
 
 
 @app.delete("/api/books/{bid}")
@@ -370,17 +649,31 @@ def secim_dogrula(bid: int, secim: Secim) -> tuple[dict, list]:
 
 
 def tahmin_hesapla(bid: int, nolar: list) -> dict:
-    """Seçimin tahmini maliyeti: defterdeki sayfa başı ortalama (OCR+çeviri) ya da varsayılan."""
-    bitmis = {s["no"] for s in sor(SAYFA_OZETI + " WHERE p.book_id=?", bid) if s["blok"] and not s["cevrilmemis"]}
+    """Seçimin tahmini maliyeti: defterdeki sayfa başı ortalama (OCR+çeviri) ya da varsayılan; çift okuma açıksa
+    OCR'lanacak her sayfaya ikinci okumanın ortalaması eklenir."""
+    ozet = sor(SAYFA_OZETI + " WHERE p.book_id=?", bid)
+    bitmis = {s["no"] for s in ozet if s["blok"] and not s["cevrilmemis"]}
+    okunmus = {s["no"] for s in ozet if s["blok"]}
     islenecek = [n for n in nolar if n not in bitmis]
-    ortalama = sor("""SELECT AVG(t) AS o FROM (SELECT SUM(maliyet) AS t FROM usage
-                      WHERE page_id IS NOT NULL AND adim IN ('ocr','ceviri') GROUP BY page_id)""")[0]["o"]
+    ortalama_sql = """SELECT AVG(t) AS o FROM (SELECT SUM(maliyet) AS t FROM usage
+                      WHERE page_id IS NOT NULL AND adim IN ({}) GROUP BY page_id)"""
+    ortalama = sor(ortalama_sql.format("'ocr','ceviri'"))[0]["o"]
     sayfa_basi = ortalama or VARSAYILAN_SAYFA_MALIYETI
+    cift = kitap_ayari(bid)["cift_okuma"]
+    ocr2_ek = (len([n for n in islenecek if n not in okunmus])
+               * (sor(ortalama_sql.format("'ocr2'"))[0]["o"] or VARSAYILAN_OCR2_MALIYETI)) if cift else 0.0
     h = harcama()
-    tahmin = len(islenecek) * sayfa_basi
+    tahmin = len(islenecek) * sayfa_basi + ocr2_ek
     return {"secilen": len(nolar), "islenecek": len(islenecek), "sayfa_basi": sayfa_basi,
-            "ortalama_defterden": bool(ortalama), "tahmin": tahmin, "bugun_kalan": max(0.0, GUNLUK_BUTCE - h["bugun"]),
-            "kalan": h["kalan"], "yeter": tahmin <= h["kalan"]}
+            "ortalama_defterden": bool(ortalama), "cift_okuma": cift, "ocr2_ek": ocr2_ek, "tahmin": tahmin,
+            "bugun_kalan": max(0.0, GUNLUK_BUTCE - h["bugun"]), "kalan": h["kalan"], "yeter": tahmin <= h["kalan"]}
+
+
+@app.get("/api/books/{bid}/queue")
+def kuyruk_listesi(bid: int):
+    """Şüpheli kelime kuyruğu: okunamayan [?], harekelemede harf değişimi, çift okuma farkı."""
+    bul("books", bid)
+    return kuyruk(bid)
 
 
 @app.post("/api/books/{bid}/estimate")
@@ -455,7 +748,14 @@ def sayfalar():
 @app.get("/api/pages/{pid}")
 def sayfa(pid: int):
     s = bul("pages", pid)
-    s["pasajlar"] = [zengin(p) for p in sor("SELECT * FROM passages WHERE page_id=? ORDER BY sira", pid)]
+    s["pasajlar"] = [zengin(p) for p in sor("""SELECT p.*, b.page_id AS bagli_sayfa FROM passages p
+        LEFT JOIN passages b ON b.id=p.bagli_id WHERE p.page_id=? ORDER BY p.sira""", pid)]
+    talikler = {}  # şerh pasajına bağlı talikler (sonraki sayfadakiler dahil)
+    for t in sor("""SELECT t.id, t.page_id, t.lemma, t.bagli_id FROM passages t JOIN pages pg ON pg.id=t.page_id
+                    WHERE t.bagli_id IN (SELECT id FROM passages WHERE page_id=?) ORDER BY pg.no, t.sira""", pid):
+        talikler.setdefault(t.pop("bagli_id"), []).append(t)
+    for p in s["pasajlar"]:
+        p["talikler"] = talikler.get(p["id"], [])
     return s
 
 
@@ -481,18 +781,37 @@ def sayfa_sil(pid: int):
     return {"silindi": pid}
 
 
-def ocr_yap(pid: int):
-    s = bul("pages", pid)
-    ham = ai("ocr", [llm_modul.resim(VERI / "sayfa" / s["dosya"]), OCR_PROMPT], pid,
+def ocr_oku(adim: str, s: dict) -> list:
+    ham = ai(adim, [llm_modul.resim(VERI / "sayfa" / s["dosya"]), OCR_PROMPT], s["id"],
              response_mime_type="application/json", response_schema=OCR_SCHEMA)
     try:
-        bloklar = [b for b in json.loads(ham)["bloklar"] if b["metin"].strip()]
-    except (ValueError, KeyError, TypeError) as e:
-        raise HTTPException(502, f"OCR yanıtı çözümlenemedi: {e}")
+        return [{"tur": b["tur"], "metin": b["metin"].strip(), "kutu": kutu_dogrula(b.get("kutu"))}
+                for b in json.loads(ham)["bloklar"] if b["metin"].strip()]
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        raise HTTPException(502, f"{adim} yanıtı çözümlenemedi: {e}")
+
+
+def ocr_yap(pid: int) -> list:
+    """Sayfayı okur; kitap ayarına göre ikinci modelle de okuyup farkları işaretler ve hâşiyeyi taliklere böler.
+    İkinci okuma yalnızca karşılaştırma içindir; hata verirse birincil sonuç kaydedilir. Uyarıları döndürür."""
+    s = bul("pages", pid)
+    ayar = kitap_ayari(s["book_id"])
+    bloklar = ocr_oku("ocr", s)
+    uyarilar, supheli = [], {}
+    if ayar["cift_okuma"]:
+        try:
+            supheli = okuma_karsilastir(bloklar, ocr_oku("ocr2", s))
+        except HTTPException as e:
+            uyarilar.append(f"s. {s['no']}: ikinci okuma yapılamadı, birincil okuma kaydedildi ({e.detail})")
     with closing(db()) as c, c:
         c.execute("DELETE FROM passages WHERE page_id=?", (pid,))
-        c.executemany("INSERT INTO passages(page_id, sira, tur, ar) VALUES(?,?,?,?)",
-                      [(pid, i, b["tur"], b["metin"].strip()) for i, b in enumerate(bloklar)])
+        c.executemany("INSERT INTO passages(page_id, sira, tur, ar, kutu, supheli) VALUES(?,?,?,?,?,?)",
+                      [(pid, i, b["tur"], b["metin"], json.dumps(b["kutu"]) if b["kutu"] else None,
+                        json.dumps(supheli[i], ensure_ascii=False) if supheli.get(i) else None)
+                       for i, b in enumerate(bloklar)])
+    if ayar["talik_bol"]:
+        talik_bol(pid)
+    return uyarilar
 
 
 @app.post("/api/pages/{pid}/ocr")
@@ -502,22 +821,33 @@ def ocr(pid: int, zorla: bool = False):
     if emek and not zorla:
         raise HTTPException(409, f"Bu sayfada {emek} çevrilmiş/onaylı pasaj var; yeniden OCR bunları siler.")
     with tek_is():
-        ocr_yap(pid)
-    return sayfa(pid)
+        uyarilar = ocr_yap(pid)
+    return {**sayfa(pid), "uyarilar": uyarilar}
 
 
 @app.post("/api/pages/{pid}/process")
-def isle(pid: int):
+def isle(pid: int, asama: Literal["hepsi", "ocr", "ceviri"] = "hepsi"):
     """Toplu işin bir sayfası: OCR'lanmamışsa OCR, sonra çevirisi boş şerh/hâşiye pasajlarının çevirisi.
-    Harekeleme yapılmaz. İşlenmiş sayfada OCR tekrarlanmaz, çevirisi olan pasaj yeniden çevrilmez."""
+    Harekeleme yapılmaz. İşlenmiş sayfada OCR tekrarlanmaz, çevirisi olan pasaj yeniden çevrilmez.
+    Toplu iş önce bütün sayfalar için asama=ocr, sonra asama=ceviri çağırır; böylece çeviride komşu sayfa hazırdır."""
     bul("pages", pid)
+    uyarilar = []
     with tek_is():
-        if not sor("SELECT 1 FROM passages WHERE page_id=? LIMIT 1", pid):
-            ocr_yap(pid)
-        for p in sor("SELECT * FROM passages WHERE page_id=? AND tur!='diger' AND TRIM(tr)='' AND durum!='onayli' "
-                     "ORDER BY sira", pid):
-            ceviri_yap(p)
-    return sayfa(pid)
+        if asama != "ceviri" and not sor("SELECT 1 FROM passages WHERE page_id=? LIMIT 1", pid):
+            uyarilar = ocr_yap(pid)
+        if asama != "ocr":
+            for p in sor("SELECT * FROM passages WHERE page_id=? AND tur!='diger' AND TRIM(tr)='' "
+                         "AND durum!='onayli' ORDER BY sira", pid):
+                ceviri_yap(p)
+    return {**sayfa(pid), "uyarilar": uyarilar}
+
+
+@app.post("/api/pages/{pid}/split")
+def taliklere_bol(pid: int):
+    """Hâşiyeyi "قوله" taliklerine böler ve lemmaları şerhe bağlar; LLM çağrısı yok."""
+    bul("pages", pid)
+    rapor = talik_bol(pid)
+    return {**sayfa(pid), "rapor": rapor}
 
 
 # ---------- pasajlar ----------
@@ -536,14 +866,16 @@ def pasaj_guncelle(kid: int, g: PasajGuncelle):
         raise HTTPException(422, "Çevirisi boş pasaj onaylanamaz")
     if "ar" in alan and alan["ar"] != p["ar"]:
         alan["ar_vocalized"] = None  # asıl metin değişti; eski harekeleme artık onu yansıtmıyor
+        supheli = supheli_gecerli({**p, "ar": alan["ar"]})  # düzeltilen kelimenin çift okuma maddesi düşer
+        alan["supheli"] = json.dumps(supheli, ensure_ascii=False) if supheli else None
     if alan:
         yaz(f"UPDATE passages SET {', '.join(k + '=?' for k in alan)} WHERE id=?", *alan.values(), kid)
     return zengin(bul("passages", kid))
 
 
 def ceviri_yap(p: dict):
-    sozluk_ek = sozluk_metni(p["ar"])
-    tr = ai_parcali("ceviri", lambda m: sozluk_ek + CEVIRI_PROMPT.format(metin=m), p["ar"], p["page_id"])
+    ek = sozluk_metni(p["ar"]) + komsu_baglam(p)
+    tr = ai_parcali("ceviri", lambda m: ek + CEVIRI_PROMPT.format(metin=m), p["ar"], p["page_id"])
     yaz("UPDATE passages SET tr=? WHERE id=?", tr, p["id"])
 
 
@@ -554,6 +886,21 @@ def cevir(kid: int):
         raise HTTPException(409, "Onaylı pasaj yeniden çevrilmez; önce onayı kaldır")
     ceviri_yap(p)
     return zengin(bul("passages", kid))
+
+
+class Kapat(BaseModel):
+    anahtar: str = Field(min_length=1)
+
+
+@app.post("/api/passages/{kid}/dismiss")
+def madde_kapat(kid: int, k: Kapat):
+    """Şüpheli kuyruğundaki bir maddeyi "baktım" diye kalıcı olarak kapatır."""
+    p = bul("passages", kid)
+    if k.anahtar not in {m["anahtar"] for m in kuyruk_maddeleri(p)}:
+        raise HTTPException(404, "Bu madde kuyrukta yok (metin değişmiş ya da zaten kapatılmış olabilir)")
+    kapali = json_oku(p["kapali"], [])
+    yaz("UPDATE passages SET kapali=? WHERE id=?", json.dumps(kapali + [k.anahtar], ensure_ascii=False), kid)
+    return {"kalan": len(kuyruk(bul("pages", p["page_id"])["book_id"]))}
 
 
 @app.post("/api/passages/{kid}/vocalize")

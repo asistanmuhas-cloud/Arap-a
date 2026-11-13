@@ -27,7 +27,8 @@ Sayfadaki metni okuma sırasına göre bloklara ayır:
 - "hasiye": çerçevenin üstündeki/altındaki metin ve kenardaki sütun ("قوله" ile başlayan talikler)
 - "diger": sayfa numarası, bölüm başlığı, alt not
 Kurallar: harfleri olduğu gibi yaz, düzeltme/modernleştirme yapma; baskıdaki harekeleri koru,
-yenisini ekleme; okunamayan kelimeyi [?] yap; satır sonu kesmelerini birleştir."""
+yenisini ekleme; okunamayan kelimeyi [?] yap; satır sonu kesmelerini birleştir.
+Her bloğun sayfadaki yerini "kutu" alanına [ymin, xmin, ymax, xmax] olarak 0-1000 arası normalize tam sayılarla yaz."""
 
 HAREKE_PROMPT = """Aşağıdaki klasik Arapça metni tam harekele (i'râb dahil).
 SADECE hareke ekle: hiçbir harfi, hemzeyi, noktalamayı veya boşluğu değiştirme, ekleme, silme.
@@ -51,6 +52,7 @@ OCR_SCHEMA = {
                 "properties": {
                     "tur": {"type": "string", "enum": ["serh", "hasiye", "diger"]},
                     "metin": {"type": "string"},
+                    "kutu": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4},
                 },
                 "required": ["tur", "metin"],
             },
