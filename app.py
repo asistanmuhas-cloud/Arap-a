@@ -852,8 +852,8 @@ def yalniz_matn(bid: int):
     sonuc = []
     for p in sor("""SELECT pg.no, p.id, p.page_id, p.sira, p.ar, p.tr, p.durum FROM passages p
                     JOIN pages pg ON pg.id=p.page_id WHERE pg.book_id=? AND p.tur='serh' ORDER BY pg.no, p.sira""", bid):
-        ar = [{"metin": m.group(1).strip(), "bas": m.start(1), "son": m.end(1)}
-              for m in re.finditer(r"\(([^()]*)\)", p["ar"]) if m.group(1).strip()]
+        ar = [{"metin": m.group(1), "bas": m.start(1), "son": m.end(1)}
+              for m in re.finditer(r"\(\s*([^()]*?)\s*\)", p["ar"]) if m.group(1)]
         tr = [{"metin": m.group(1).strip(), "bas": m.start(1), "son": m.end(1)}
               for m in re.finditer(r"\*\*(.+?)\*\*", p["tr"], re.S) if m.group(1).strip()]
         if ar or tr:

@@ -755,7 +755,7 @@ x1, x2, x4 = (liste[ids.index(k)] for k in (m1, m2, m4))
 assert [a["metin"] for a in x1["ar"]] == ["فرض الوضوء", "غسل الوجه"] and not x1["uyusmaz"]
 assert [t["metin"] for t in x1["tr"]] == ["Abdestin farzı", "yüzü yıkamak"] and x1["page_id"] == sA[1]
 ar1, tr1 = uyg.bul("passages", m1)["ar"], uyg.bul("passages", m1)["tr"]
-assert all(ar1[a["bas"]:a["son"]].strip() == a["metin"] for a in x1["ar"])
+assert all(ar1[a["bas"]:a["son"]] == a["metin"] for a in x1["ar"])
 assert all(tr1[t["bas"]:t["son"]] == t["metin"] for t in x1["tr"])
 assert x2["uyusmaz"] and len(x2["ar"]) == 2 and len(x2["tr"]) == 1  # gösterilir ama işaretli
 assert x4["cevrilmemis"] and not x4["uyusmaz"] and x4["tr"] == []
