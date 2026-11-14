@@ -48,7 +48,7 @@ VARSAYILAN_OCR2_MALIYETI = 0.03  # USD; çift okumanın ikinci okuması için, d
 BAGLAM = 300  # komşu sayfadan çeviri isteğine eklenen bağlam (karakter)
 AZAMI_LEMMA = 100  # talik lemması (قوله ... ")") en fazla bu kadar karakter
 AZAMI_FARK = 4  # çift okumada bundan uzun ayrışma kelime farkı değil blok/katman kaymasıdır; sayılmaz
-AYARLAR = {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False,
+AYARLAR = {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False, "diger_cevir": False,
            "model_serh": None, "model_hasiye": None}  # kitap ayarları (books.ayar JSON) ve varsayılanları
 # seçmeli ayarlar: değer llm.FIYAT'taki bir model ya da None (varsayılan: MODEL_CEVIRI / llm.MODELLER["ceviri"])
 MODEL_AYARLARI = ("model_serh", "model_hasiye")
@@ -1419,16 +1419,16 @@ def isle(pid: int, asama: Literal["hepsi", "ocr", "ceviri"] = "hepsi"):
     Harekeleme yapılmaz. İşlenmiş sayfada OCR tekrarlanmaz, çevirisi olan pasaj yeniden çevrilmez.
     Toplu iş önce bütün sayfalar için asama=ocr, sonra asama=ceviri çağırır; böylece çeviride komşu sayfa hazırdır.
     Gece kuyruğundaki sayfa 409."""
-    bul("pages", pid)
+    ayar = kitap_ayari(bul("pages", pid)["book_id"])
     kuyrukta_degil(pid)
     uyarilar = []
     with tek_is():
         if asama != "ceviri" and not sor("SELECT 1 FROM passages WHERE page_id=? LIMIT 1", pid):
             uyarilar = ocr_yap(pid)
         if asama != "ocr":
-            for p in sor("SELECT * FROM passages WHERE page_id=? AND tur!='diger' AND TRIM(tr)='' "
-                         "AND durum!='onayli' ORDER BY sira", pid):
-                ceviri_yap(p)
+            for p in sor("SELECT * FROM passages WHERE page_id=? AND TRIM(tr)='' AND durum!='onayli' ORDER BY sira", pid):
+                if cevrilecek(p, ayar):
+                    ceviri_yap(p)
     return {**sayfa(pid), "uyarilar": uyarilar}
 
 
@@ -1485,6 +1485,12 @@ def surume_don(kid: int, vid: int):
     if p["durum"] == "onayli":
         raise HTTPException(409, "Onaylı pasajda sürüme dönülmez; önce onayı kaldır")
     return pasaj_yaz(p, {s[0]["alan"]: s[0]["metin"]}, "geri")
+
+
+def cevrilecek(p: dict, ayar: dict) -> bool:
+    """Toplu çeviride (sayfa, toplu iş, gece kuyruğu) pasaj çevrilir mi: şerh ve hâşiye her zaman; "diğer" katmanı yalnız
+    kitabın diger_cevir ayarı açıksa ve metinde Arapça harf varsa (sayfa numarası gibi harfsiz bloklar çağrı harcamaz)."""
+    return p["tur"] != "diger" or bool(ayar["diger_cevir"] and re.search("[ء-ي]", p["ar"]))
 
 
 def ceviri_hazirla(p: dict) -> tuple:
@@ -1729,10 +1735,14 @@ def gece_ceviri_gonder(gid: int, pidler: list) -> list:
     """Çevirisi boş, onaysız şerh/hâşiye pasajlarının çeviri istekleri; istek tek pasaj "Çevir"le aynı (ceviri_hazirla:
     sözlük, yönerge, bellek, âyet kuralı, komşu sayfa bağlamı, katman modeli). Model başına bir uzak iş."""
     pasajlar = sor(f"""SELECT p.* FROM passages p JOIN pages pg ON pg.id=p.page_id
-                       WHERE p.page_id IN ({','.join('?' * len(pidler))}) AND p.tur!='diger' AND TRIM(p.tr)=''
+                       WHERE p.page_id IN ({','.join('?' * len(pidler))}) AND TRIM(p.tr)=''
                        AND p.durum!='onayli' ORDER BY pg.no, p.sira""", *pidler)
-    gruplar = {}
+    gruplar, ayarlar = {}, {}
     for p in pasajlar:
+        if p["page_id"] not in ayarlar:
+            ayarlar[p["page_id"]] = kitap_ayari(bul("pages", p["page_id"])["book_id"])
+        if not cevrilecek(p, ayarlar[p["page_id"]]):
+            continue
         ek, model = ceviri_hazirla(p)
         gruplar.setdefault(llm_modul.model_sec("ceviri", model), []).append(
             (f"ceviri:{p['page_id']}:{p['id']}", ek + CEVIRI_PROMPT.format(metin=p["ar"]), {}))

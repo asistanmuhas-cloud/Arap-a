@@ -325,7 +325,7 @@ OCR2[dosya[3]] = "bozuk json"
 
 # kitap ayarları: varsayılan kapalı, doğrulanır, yalnızca verilen değişir
 k = c.get(f"/api/books/{bid}").json()
-MODELSIZ = {"model_serh": None, "model_hasiye": None}  # katman modeli seçilmemiş: varsayılan çeviri modeli
+MODELSIZ = {"diger_cevir": False, "model_serh": None, "model_hasiye": None}  # katman modeli seçilmemiş: varsayılan çeviri modeli
 assert k["ayar"] == {"talik_bol": False, "cift_okuma": False, "ceviri_bellegi": True, "ayet_isaret": False,
                      **MODELSIZ} and k["kuyruk"] == 0
 assert c.patch(f"/api/books/{bid}", json={"ayar": {"yok": True}}).status_code == 422

@@ -1236,9 +1236,9 @@ function ciz() {
       + ' — emek kaybolmasın diye; bölmek için önce çeviriyi/harekelemeyi temizle ya da onayı kaldır.';
     bildir(m, r.atlanan.length > 0);
   });
-  const topluD = el('button', { textContent: 'Sayfayı çevir', className: 'ana', title: 'Bu sayfada çevirisi boş olan şerh ve hâşiye pasajlarını sırayla çevirir' });
+  const topluD = el('button', { textContent: 'Sayfayı çevir', className: 'ana', title: 'Bu sayfada çevirisi boş olan şerh ve hâşiye pasajlarını sırayla çevirir (kitap ayarı açıksa "Diğer" pasajları da)' });
   topluD.onclick = () => mesgul(topluD, async () => {
-    for (const p of sayfa.pasajlar.filter(p => p.tur !== 'diger' && !p.tr.trim())) {
+    for (const p of sayfa.pasajlar.filter(p => !p.tr.trim() && (p.tur !== 'diger' || (kitap.ayar.diger_cevir && /[ء-ي]/.test(p.ar))))) {
       bildir(`Çevriliyor: pasaj ${p.sira + 1}…`);
       degistir(await api(`/api/passages/${p.id}/translate`, 'POST'));
     }
@@ -1278,7 +1278,7 @@ function pasajDugumu(p) {
     ...['serh', 'hasiye', 'diger'].map(t => el('option', { value: t, textContent: { serh: 'Şerh', hasiye: 'Hâşiye', diger: 'Diğer' }[t] })));
   tur.value = p.tur; tur.onchange = () => kaydet(p, { tur: tur.value }).then(() => ozetYukle());
   const ar = el('textarea', { className: 'ar', value: p.ar, rows: 1, spellcheck: false, ariaLabel: 'Arapça metin' });
-  const tr = el('textarea', { className: 'tr', value: p.tr, rows: 1, placeholder: p.tur === 'diger' ? '' : 'Çeviri…', lang: 'tr', ariaLabel: 'Türkçe çeviri' });
+  const tr = el('textarea', { className: 'tr', value: p.tr, rows: 1, placeholder: p.tur === 'diger' && !kitap.ayar.diger_cevir ? '' : 'Çeviri…', lang: 'tr', ariaLabel: 'Türkçe çeviri' });
   ar.oninput = () => boyla(ar); tr.oninput = () => boyla(tr);
   ar.onchange = () => ar.value.trim() ? kaydet(p, { ar: ar.value.trim() }).then(() => { ozetYukle(); if ($('#yan').dataset.tur === 'kuyruk') kuyrukAc(); }) : (ar.value = p.ar);
   tr.onchange = () => kaydet(p, { tr: tr.value }).then(() => { ozetYukle(); if ($('#yan').dataset.tur === 'kuyruk') kuyrukAc(); });
@@ -1287,14 +1287,14 @@ function pasajDugumu(p) {
     await kaydet(p, { tr: tr.value, durum: onayli ? 'onayli' : 'taslak' });
     ozetYukle();
     if (sonrakineGec) {
-      const sonraki = sayfa.pasajlar.find(x => x.sira > p.sira && x.tur !== 'diger' && x.durum !== 'onayli');
+      const sonraki = sayfa.pasajlar.find(x => x.sira > p.sira && (x.tur !== 'diger' || kitap.ayar.diger_cevir) && x.durum !== 'onayli');
       if (sonraki) document.querySelector(`#p${sonraki.id} .tr`).focus();
       else bildir('Bu sayfadaki pasajların hepsi onaylı');
     }
   };
   tr.onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); tr.onchange = null; onayla(true).catch(() => {}); } };
   const islem = (yol, bekle) => async () => { bildir(bekle); degistir(await api(`/api/passages/${p.id}/${yol}`, 'POST')); bildir(''); ozetYukle(); };
-  const metin = p.tur !== 'diger';
+  const metin = p.tur !== 'diger' || !!kitap.ayar.diger_cevir;
   const cevirD = el('button', { textContent: 'Çevir', className: 'kucukD', title: `Çeviri modeli: ${kitap.ayar['model_' + p.tur] || sunucu.ceviri_modeli}` });
   cevirD.onclick = () => mesgul(cevirD, islem('translate', 'Çevriliyor…'));
   const onayD = el('button', { textContent: p.durum === 'onayli' ? 'Onayı kaldır' : 'Onayla', className: 'kucukD' + (p.durum === 'onayli' ? '' : ' ana'),
@@ -1407,6 +1407,8 @@ const AYAR_TANIM = [
     aciklama: 'Çeviri isteğine onaylı pasajlardan en benzer üç tanesi (önce bu kitaptan) üslup ve terim örneği olarak eklenir. Benzer onaylı pasaj yoksa bir şey eklenmez. Varsayılan olarak açık.' },
   { ad: 'ayet_isaret', baslik: 'Âyet ve hadis işaretleme',
     aciklama: 'Âyet meali *italik* yazılıp ardından [Sûre 5/6] biçiminde kaynak verilir; hadis "tırnak" içinde ve [hadis] etiketiyle. Her âyet etiketi doğrulanmak üzere şüpheli kuyruğuna düşer. Çeviri isteğini biraz uzatır.' },
+  { ad: 'diger_cevir', baslik: '"Diğer" katmanını da çevir',
+    aciklama: 'OCR modelinin şerh ya da hâşiye saymayıp "Diğer" diye etiketlediği bloklar (başlık, dipnot, yanlış etiketlenmiş hâşiye) da çevrilir: pasajda "Çevir" düğmesi çıkar; "Sayfayı çevir", toplu iş ve gece kuyruğu bunları da alır. Arapça harf içermeyen bloklar (sayfa numarası) atlanır. Çeviri maliyetini artırır.' },
   // secim: 'model' — değer sunucunun fiyat tablosundaki bir model ya da varsayılan (null)
   { ad: 'model_serh', baslik: 'Şerh çeviri modeli', secim: 'model',
     aciklama: 'Şerh pasajları bu modelle çevrilir (tek pasaj "Çevir", toplu iş ve gece kuyruğu). Ucuz model maliyeti düşürür ama terim ve matn ayrımında daha çok düzeltme gerektirebilir.' },
