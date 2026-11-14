@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS passages(
     sira INTEGER NOT NULL, tur TEXT NOT NULL, ar TEXT NOT NULL, ar_vocalized TEXT,
     tr TEXT NOT NULL DEFAULT '', durum TEXT NOT NULL DEFAULT 'taslak',
     kutu TEXT, lemma TEXT, bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL, supheli TEXT, kapali TEXT,
-    notu TEXT NOT NULL DEFAULT '', isaretli INTEGER NOT NULL DEFAULT 0);
+    notu TEXT NOT NULL DEFAULT '', isaretli INTEGER NOT NULL DEFAULT 0, yorum TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS surumler(
     id INTEGER PRIMARY KEY, passage_id INTEGER NOT NULL REFERENCES passages(id) ON DELETE CASCADE,
     alan TEXT NOT NULL, metin TEXT NOT NULL, neden TEXT NOT NULL,
@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS gece(
 # şerh alıntısı; bagli_id: lemmanın bulunduğu şerh pasajı. supheli: çift okumada ayrışan kelimeler, JSON
 # [{kelime, diger, i}] (i: kelimenin pasajdaki sırası). kapali: şüpheli kuyruğunda "baktım" denen maddelerin anahtarları.
 # books.yonerge: kitaba özel üslup yönergesi (serbest metin); boş değilse çeviri ve öneri isteklerine eklenir.
+# passages.yorum: modelin çeviriye eklediği, asıl metinde olmayan açıklamalar (ÇN satırları; bkz. yorum_ayir); çeviri
+# metninden ayrı tutulur, çıktıya girmez.
 # passages.notu: kısa serbest not; isaretli: "tekrar bak" işareti (0/1). surumler: pasajın ar/tr metni her değiştiğinde
 # ÖNCEKİ metin (alan 'ar'|'tr'); neden: elle | ceviri (yeniden çeviri) | oneri (öneri kabulü) | geri (sürüme dönme) |
 # bolme (taliklere bölme). Pasaj silinince (sayfa silme, yeniden OCR) sürümleri de silinir.
@@ -135,6 +137,29 @@ benzer pasajlar; terim seçimini ve üslubu bunlarla tutarlı tut, ama yalnızca
 {ornekler}--- örnekler sonu ---
 
 """
+YORUM_SATIRI = re.compile(r"^[\s*_>\[(-]*ÇN\s*[:：][\s*_]*(.*?)[\s*_]*$")
+
+
+def yorum_ayir(metin: str) -> tuple:
+    """Model çıktısını (çeviri, yorum) diye ayırır: "ÇN:" ile başlayan satırlar modelin kendi açıklamasıdır
+    (CEVIRI_PROMPT), çeviriden çıkarılıp satır satır yoruma toplanır. Uzun metin parçalı çevrildiyse ÇN satırları
+    arada da olabilir; hepsi alınır."""
+    ceviri, yorum = [], []
+    for satir in metin.splitlines():
+        m = YORUM_SATIRI.match(satir)
+        if m:
+            if m.group(1):
+                yorum.append(m.group(1))
+        else:
+            ceviri.append(satir)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(ceviri)).strip(), "\n".join(yorum)
+
+
+def ceviri_alani(metin: str) -> dict:
+    tr, yorum = yorum_ayir(metin)
+    return {"tr": tr, "yorum": yorum}
+
+
 AYET_PROMPT = """Ek kural — âyet ve hadis: metindeki Kur'an âyeti alıntılarının mealini *italik* yaz ve hemen ardından
 köşeli parantezle kaynağını ver: [Sûre adı sûre_no/âyet_no], ör. [Mâide 5/6]. Hadis alıntılarını "tırnak" içinde yaz,
 ardından [hadis] etiketi koy. Kaynaktan emin değilsen [âyet ?] yaz; sûre ya da âyet numarası uydurma.
@@ -185,7 +210,8 @@ def gec(c: sqlite3.Connection):
     sutun_ekle(c, "books", "ayar TEXT NOT NULL DEFAULT '{}'", "yonerge TEXT NOT NULL DEFAULT ''")
     sutun_ekle(c, "usage", "gece_id INTEGER")
     sutun_ekle(c, "passages", "kutu TEXT", "lemma TEXT", "bagli_id INTEGER REFERENCES passages(id) ON DELETE SET NULL",
-               "supheli TEXT", "kapali TEXT", "notu TEXT NOT NULL DEFAULT ''", "isaretli INTEGER NOT NULL DEFAULT 0")
+               "supheli TEXT", "kapali TEXT", "notu TEXT NOT NULL DEFAULT ''", "isaretli INTEGER NOT NULL DEFAULT 0",
+               "yorum TEXT NOT NULL DEFAULT ''")
     sahipsiz = [r["id"] for r in c.execute("SELECT id FROM pages WHERE book_id IS NULL ORDER BY no, id")]
     if sahipsiz:
         bid = c.execute("INSERT INTO books(ad, sayfa_sayisi) VALUES('Eski sayfalar', ?)", (len(sahipsiz),)).lastrowid
@@ -1421,6 +1447,7 @@ class PasajGuncelle(BaseModel):
     tur: Optional[Literal["serh", "hasiye", "diger"]] = None
     durum: Optional[Literal["taslak", "onayli"]] = None
     notu: Optional[str] = Field(None, max_length=AZAMI_NOT)  # boş metin notu kaldırır
+    yorum: Optional[str] = Field(None, max_length=8000)  # model açıklaması; boş metin kaldırır
     isaretli: Optional[StrictBool] = None  # "tekrar bak"
     neden: Literal["elle", "oneri"] = "elle"  # metin değişirse sürüm kaydının nedeni (öneri kabulü ayrı görünür)
 
@@ -1433,6 +1460,8 @@ def pasaj_guncelle(kid: int, g: PasajGuncelle):
         raise HTTPException(422, "Çevirisi boş pasaj onaylanamaz")
     if "notu" in alan:
         alan["notu"] = alan["notu"].strip()
+    if "yorum" in alan:
+        alan["yorum"] = alan["yorum"].strip()
     if "isaretli" in alan:
         alan["isaretli"] = int(alan["isaretli"])
     return pasaj_yaz(p, alan, g.neden)
@@ -1472,7 +1501,7 @@ def ceviri_hazirla(p: dict) -> tuple:
 def ceviri_yap(p: dict):
     ek, model = ceviri_hazirla(p)
     tr = ai_parcali("ceviri", lambda m: ek + CEVIRI_PROMPT.format(metin=m), p["ar"], p["page_id"], model)
-    pasaj_yaz(bul("passages", p["id"]), {"tr": tr}, "ceviri")  # çeviri sürerken yapılan düzenleme de sürüm olur
+    pasaj_yaz(bul("passages", p["id"]), ceviri_alani(tr), "ceviri")  # çeviri sürerken yapılan düzenleme de sürüm olur
 
 
 @app.post("/api/passages/{kid}/translate")
@@ -1796,7 +1825,7 @@ def gece_ceviri_kaydet(yanit: dict) -> list:
                             "mesaj": f"pasaj {p['sira'] + 1}: çeviri: {y['hata']}"})
         elif not p["tr"].strip() and p["durum"] != "onayli":
             p.pop("no")
-            pasaj_yaz(p, {"tr": y["metin"]}, "ceviri")
+            pasaj_yaz(p, ceviri_alani(y["metin"]), "ceviri")
     return hatalar
 
 

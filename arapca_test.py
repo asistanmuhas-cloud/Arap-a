@@ -38,7 +38,10 @@ Yalnızca harekeli metni döndür.
 
 CEVIRI_PROMPT = """Aşağıdaki Hanefî fıkıh metnini akademik Türkçeye çevir.
 Parantez içindeki matn ifadelerini kalın (**...**) yaz. Fıkıh terimlerini yerleşik Türkçe
-karşılıklarıyla ver (ör. farz, vacip, mesh). Yalnızca çeviriyi döndür.
+karşılıklarıyla ver (ör. farz, vacip, mesh). Yalnızca çeviriyi döndür: giriş cümlesi, sunuş ("çevirisi şöyledir"
+gibi) ya da özet yazma. Asıl metinde bulunmayan kendi açıklamanı (ör. bir beytin kime ait olduğu, bir ifadenin
+izahı) çeviri cümlelerinin içine katma; gerekli görürsen çevirinin SONUNA, her açıklamayı tek satırda ve satır başında
+"ÇN:" ile yaz. Açıklama gerekmiyorsa ÇN satırı yazma.
 
 {metin}"""
 

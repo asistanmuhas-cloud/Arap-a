@@ -280,6 +280,10 @@ textarea.tr::placeholder { color:#a9b2b8; font-style:italic; }
 .ek .ar { font-size:18px; line-height:1.6; }
 .ek .harekeli { font-size:20px; line-height:1.9; color:var(--yazi); margin-top:4px; }
 .ek.uyari { color:var(--uyari); }
+.ek.yorum { border:1px solid var(--bilgi); border-inline-start-width:3px; border-radius:var(--rk); background:var(--bilgiAcik); color:var(--bilgi); padding:8px 10px; font:14px/1.6 var(--serif); }
+.ek.yorum > .ekAd { color:var(--bilgi); font-family:var(--sans); }
+.ek.yorum p { margin:0 0 4px; } .ek.yorum p:last-of-type { margin-bottom:0; }
+.ek.yorum button { flex:none; align-self:flex-start; font-family:var(--sans); }
 .pasaj > .ek { grid-column:1/-1; margin:0; padding:8px 14px; border-top:1px solid var(--cizgi); background:var(--yuzey2); }
 .pasaj > .ek.not { background:var(--isaretAcik); }
 .notGir { font:13.5px/1.5 var(--sans); color:var(--yazi); }
@@ -1341,6 +1345,13 @@ function pasajDugumu(p) {
       m.diger ? el('span', { className: 'ar', textContent: m.diger }) : 'yok'])), { className: 'ek uyari' }));
   const trHucre = el('div', { className: 'h' }, tr);
   if (p.sapma.length) trHucre.append(Object.assign(ek('Sözlük', 'Sapma: ' + p.sapma.map(t => `${t.ar} → ${t.tr}`).join(' · ')), { className: 'ek uyari' }));
+  if (p.yorum) {  // modelin eklediği, asıl metinde olmayan açıklama: çeviriden ayrı kutuda
+    const kaldir = el('button', { className: 'kucukD', textContent: 'Kaldır', title: 'Bu açıklamayı sil (çeviri metni değişmez)' });
+    kaldir.onclick = () => mesgul(kaldir, () => kaydet(p, { yorum: '' }));
+    const kutu = Object.assign(ek('YZ notu', ...p.yorum.split('\n').map(s => el('p', { textContent: s }))),
+      { className: 'ek yorum', title: 'Yapay zekânın eklediği açıklama. Asıl metinde yoktur; çeviri metnine ve çıktıya girmez.' });
+    kutu.append(kaldir); trHucre.append(kutu);
+  }
   trHucre.append(oneriKutu);
   let lemma = null;
   if (p.lemma) {  // talik: lemma ve bağlı şerh pasajına git
