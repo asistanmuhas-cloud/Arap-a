@@ -16,6 +16,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import app as uyg  # noqa: E402
 import llm  # noqa: E402
+from datetime import date  # noqa: E402
+
+# varsayılanlar ve tarihe bağlı fiyat
+assert llm.MODELLER["ocr"] == llm.MODELLER["ceviri"] == "gemini-3.8-flash" and llm.MODELLER["ocr2"] != llm.MODELLER["ocr"]
+assert llm.fiyat("gemini-3.8-flash", date(2026, 12, 31)) == (0.75, 3.75)  # tanıtım fiyatı
+assert llm.fiyat("gemini-3.8-flash", date(2027, 1, 1)) == (1.50, 7.50) and llm.fiyat("yok") is None
+# Aşağıdaki testler varsayılanı değil mekanizmayı sınar; iki ayrı fiyatlı sabit modelle çalışırlar.
+llm.MODELLER.update(ocr="gemini-3.1-pro-preview", hareke="gemini-3.5-flash", ceviri="gemini-3.5-flash", agent="gemini-3.5-flash")
 
 AR = "(وفرض الوضوء) اي ركنه"
 cagrilar = []  # sahte LLM'e gelen adımlar
@@ -1240,7 +1248,7 @@ assert d == [{"model": "gemini-3.1-flash-lite", "girdi": 1000, "cikti": 500, "ma
 km = c.post("/api/upload", files=[("dosyalar", (f"km{i}.jpg", jpg())) for i in (1, 2)]).json()["kitaplar"][0]["id"]
 kmS = [s["id"] for s in c.get(f"/api/books/{km}").json()["sayfalar"]]
 cfg = c.get("/api/config").json()
-assert cfg["modeller"] == [{"ad": m, "girdi": f[0], "cikti": f[1]} for m, f in llm.FIYAT.items()]
+assert cfg["modeller"] == [{"ad": m, "girdi": llm.fiyat(m)[0], "cikti": llm.fiyat(m)[1]} for m in llm.FIYAT]
 assert cfg["ceviri_modeli"] == "gemini-3.5-flash" and cfg["batch_orani"] == 0.5
 assert cfg["hareke"] == {"motor": "gemini", "model": "gemini-3.5-flash"}
 for kotu in ({"model_serh": "gpt-9"}, {"model_serh": True}, {"model_hasiye": 5}, {"talik_bol": "gemini-3.5-flash"},

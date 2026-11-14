@@ -333,7 +333,7 @@ def sunucu_ayarlari():
     """Arayüzün gösterdiği sunucu ayarları: seçilebilir modeller ve 1M token fiyatları (USD), varsayılan çeviri modeli,
     harekeleme motoru (HAREKE_KOMUT varsa yerel), gece kuyruğu fiyat oranı ve yoklama aralığı."""
     yerel = bool(os.environ.get("HAREKE_KOMUT", "").strip())
-    return {"modeller": [{"ad": m, "girdi": f[0], "cikti": f[1]} for m, f in llm_modul.FIYAT.items()],
+    return {"modeller": [{"ad": m, "girdi": llm_modul.fiyat(m)[0], "cikti": llm_modul.fiyat(m)[1]} for m in llm_modul.FIYAT],
             "ceviri_modeli": llm_modul.model_sec("ceviri"),
             "hareke": {"motor": "yerel" if yerel else "gemini", "model": "yerel" if yerel else llm_modul.model_sec("hareke")},
             "batch_orani": llm_modul.BATCH_ORAN, "gece_aralik": GECE_ARALIK}

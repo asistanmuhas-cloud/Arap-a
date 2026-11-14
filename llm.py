@@ -6,23 +6,27 @@ import mimetypes
 import os
 import shlex
 import subprocess
+from datetime import date
 import time
 from pathlib import Path
 
 MODELLER = {
-    "ocr": "gemini-3.1-pro-preview",  # katman (şerh/hâşiye) ayrımını testte yalnız bu doğru yaptı
-    "ocr2": "gemini-3.5-flash",  # çift okuma: yalnızca karşılaştırma için ikinci okuma (kitap ayarı)
-    "hareke": "gemini-3.5-flash",
-    "ceviri": "gemini-3.5-flash",
-    "agent": "gemini-3.5-flash",
+    "ocr": "gemini-3.8-flash",  # en zor test sayfasında katmanları 3.1 Pro ile aynı ayırdı, üçte bir fiyatına
+    "ocr2": "gemini-3.5-flash",  # çift okuma: karşılaştırma için ikinci okuma; birincilden FARKLI bir model olmalı
+    "hareke": "gemini-3.8-flash",
+    "ceviri": "gemini-3.8-flash",
+    "agent": "gemini-3.8-flash",
     "sozluk": "gemini-3.1-flash-lite",  # onaylı pasajlardan sözlük adayı (istek üzerine)
 }
 # USD / 1M token: (girdi, çıktı). Çıktıya düşünme tokenları dahildir.
 FIYAT = {
     "gemini-3.5-flash": (1.50, 9.00),
     "gemini-3.1-flash-lite": (0.25, 1.50),
-    "gemini-3.1-pro-preview": (2.00, 12.00),  # doğrula: resmî fiyat sayfasıyla karşılaştırılmadı
+    "gemini-3.1-pro-preview": (2.00, 12.00),  # 200 bin tokena kadar olan istekler için (ai.google.dev fiyat sayfası)
+    "gemini-3.8-flash": (0.75, 3.75),  # tanıtım fiyatı; bitişi ZAMLI'da
 }
+# Tanıtım fiyatı biten modeller: (yeni fiyatın başladığı gün, yeni fiyat)
+ZAMLI = {"gemini-3.8-flash": (date(2027, 1, 1), (1.50, 7.50))}
 # Kaçak (sonu gelmeyen) bir yanıt faturayı şişirmesin diye adım başına çıktı tavanı (token).
 CIKTI_TAVANI = {"ocr": 16000, "ocr2": 16000, "ceviri": 16000, "hareke": 24000, "agent": 4000, "sozluk": 4000}
 AZ_DUSUNEN = ("hareke", "ceviri", "ocr2", "sozluk")  # düşünme tokenları çıktı fiyatından faturalanır; bu adımlarda kıs
@@ -48,9 +52,16 @@ def model_sec(adim: str, model: str = None) -> str:
     return model or os.environ.get(f"MODEL_{adim.upper()}") or MODELLER[adim]
 
 
+def fiyat(model: str, bugun: date = None):
+    """(girdi, çıktı) USD / 1M token; bugünün tarihine göre (tanıtım fiyatı bittiyse zamlı). Tabloda yoksa None."""
+    baslangic, zamli = ZAMLI.get(model, (None, None))
+    return zamli if baslangic and (bugun or date.today()) >= baslangic else FIYAT.get(model)
+
+
 def maliyet(model: str, girdi: int, cikti: int) -> float:
     """Tahmini USD; tabloda olmayan model için en pahalı girdi/çıktı fiyatı varsayılır."""
-    f_girdi, f_cikti = FIYAT.get(model) or (max(f[0] for f in FIYAT.values()), max(f[1] for f in FIYAT.values()))
+    hepsi = [fiyat(m) for m in FIYAT]
+    f_girdi, f_cikti = fiyat(model) or (max(f[0] for f in hepsi), max(f[1] for f in hepsi))
     return (girdi * f_girdi + cikti * f_cikti) / 1_000_000
 
 
