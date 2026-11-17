@@ -1,5 +1,5 @@
 // E7: ürün sayfasından ad, marka, fiyat ve görsel çeker.
-// Güvenlik: yalnızca giriş yapmış kullanıcı (Supabase JWT doğrulaması açık kalmalı), yalnızca http(s),
+// Güvenlik: yalnızca giriş yapmış kullanıcı (fonksiyon kendisi de /auth/v1/user ile doğrular), yalnızca http(s),
 // özel / yerel ağ adreslerine gitmez (her yönlendirmede yeniden kontrol), boyut ve süre sınırı var.
 
 const SAYFA_SINIR = 3_000_000;
@@ -92,6 +92,15 @@ function jsonLdUrun(html: string): Record<string, unknown> | null {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  // Ağ geçidinin JWT kontrolüne ek olarak: istek gerçek bir oturum açmış kullanıcıdan mı?
+  // Yalnız anon anahtarla gelen istek /auth/v1/user'da kullanıcı döndürmez ve reddedilir.
+  const yetki = req.headers.get("authorization") || "";
+  const kullanici = await fetch(`${Deno.env.get("SUPABASE_URL")}/auth/v1/user`, {
+    headers: { authorization: yetki, apikey: Deno.env.get("SUPABASE_ANON_KEY") || "" },
+  }).catch(() => null);
+  if (!kullanici?.ok || !(await kullanici.json().catch(() => null))?.id) {
+    return Response.json({ error: "Giriş gerekli" }, { status: 401, headers: CORS });
+  }
   try {
     const { url } = await req.json();
     if (typeof url !== "string" || url.length > 2000) throw new Error("Geçersiz link");

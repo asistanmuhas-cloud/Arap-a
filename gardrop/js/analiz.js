@@ -1,6 +1,6 @@
 // Giyim kaydı ve analiz: A2 A3 A4 P4 S2 S4 B3. Saf fonksiyonlar; tarihler 'YYYY-MM-DD'.
 import { KATEGORI, RENK, DURUM, UNUTULMA_GUN, TEKRAR_GUN } from "./sabitler.js";
-import { kapsulKombinleri } from "./oneri.js";
+import { kapsulAnalizi } from "./oneri.js";
 
 export const gunStr = (d = new Date()) => {
   const z = new Date(d.getTime() - d.getTimezoneOffset() * 6e4);
@@ -115,28 +115,27 @@ export function tekrarUyarisi({ parcalar, kombin, tarih, etkinlik }, kayitlar, g
 // S2: temel parça kontrolü ve denge.
 const KOYU = new Set(["siyah", "lacivert", "antrasit", "denim", "gri"]);
 const TEMELLER = [
-  { ad: "Beyaz ya da krem bir üst", f: (p) => p.kategori === "ust" && ["beyaz", "krem"].includes(p.renkler?.[0]) },
-  { ad: "Koyu renk pantolon ya da kot", f: (p) => p.kategori === "alt" && ["Pantolon", "Kot"].includes(p.altKategori) && KOYU.has(p.renkler?.[0]) },
-  { ad: "Nötr renk ayakkabı", f: (p) => p.kategori === "ayakkabi" && RENK[p.renkler?.[0]]?.notr },
-  { ad: "Spor ayakkabı", f: (p) => p.altKategori === "Spor ayakkabı" },
-  { ad: "Kış için mont ya da kaban", f: (p) => ["Mont", "Kaban"].includes(p.altKategori) },
-  { ad: "Ara mevsim ceketi", f: (p) => ["Ceket", "Blazer", "Trençkot"].includes(p.altKategori) },
-  { ad: "Özel gün için bir parça", f: (p) => p.ortamlar?.includes("ozel") },
-  { ad: "İş ortamına uygun üst", f: (p) => (p.kategori === "ust" || p.kategori === "tek") && p.ortamlar?.includes("is") },
+  { ad: "Beyaz ya da krem bir üst", kategori: "ust", alt: "Tişört", renk: "beyaz", f: (p) => p.kategori === "ust" && ["beyaz", "krem"].includes(p.renkler?.[0]) },
+  { ad: "Koyu renk pantolon ya da kot", kategori: "alt", alt: "Kot", renk: "lacivert", f: (p) => p.kategori === "alt" && ["Pantolon", "Kot"].includes(p.altKategori) && KOYU.has(p.renkler?.[0]) },
+  { ad: "Nötr renk ayakkabı", kategori: "ayakkabi", alt: "", renk: "siyah", f: (p) => p.kategori === "ayakkabi" && RENK[p.renkler?.[0]]?.notr },
+  { ad: "Spor ayakkabı", kategori: "ayakkabi", alt: "Spor ayakkabı", renk: "beyaz", f: (p) => p.altKategori === "Spor ayakkabı" },
+  { ad: "Kış için mont ya da kaban", kategori: "dis", alt: "Mont", renk: "", f: (p) => ["Mont", "Kaban"].includes(p.altKategori) },
+  { ad: "Ara mevsim ceketi", kategori: "dis", alt: "Ceket", renk: "", f: (p) => ["Ceket", "Blazer", "Trençkot"].includes(p.altKategori) },
+  { ad: "Özel gün için bir parça", kategori: "tek", alt: "", renk: "", f: (p) => p.ortamlar?.includes("ozel") },
+  { ad: "İş ortamına uygun üst", kategori: "ust", alt: "Gömlek", renk: "", f: (p) => (p.kategori === "ust" || p.kategori === "tek") && p.ortamlar?.includes("is") },
 ];
 export function eksikAnalizi(parcalar) {
   const aktif = parcalar.filter((p) => !p.arsiv);
-  const eksik = TEMELLER.filter((t) => !aktif.some(t.f)).map((t) => t.ad);
+  const eksik = TEMELLER.filter((t) => !aktif.some(t.f)).map(({ ad, kategori, alt, renk }) => ({ ad, kategori, alt, renk }));
   const n = (k) => aktif.filter((p) => p.kategori === k).length;
   const denge = [];
   const ust = n("ust"), alt = n("alt");
   if (ust && alt && ust / alt > 3) denge.push(`Üst parça ${ust}, alt parça ${alt}: alt eklemek kombin sayısını hızla artırır.`);
   if (ust && alt && alt / ust > 2) denge.push(`Alt parça ${alt}, üst parça ${ust}: üst eklemek daha çok kombin açar.`);
   if (aktif.length && !n("ayakkabi")) denge.push("Hiç ayakkabı eklenmemiş.");
-  const kombinler = kapsulKombinleri(aktif);
-  const kullanilan = new Set(kombinler.flat());
+  const { sayi, kullanilan } = kapsulAnalizi(aktif);
   const yetim = aktif.filter((p) => ["ust", "alt", "tek"].includes(p.kategori) && !kullanilan.has(p.id));
-  return { eksik, denge, yetim, kombinSayisi: kombinler.length };
+  return { eksik, denge, yetim, kombinSayisi: sayi };
 }
 
 // S4: elden çıkarma adayları.

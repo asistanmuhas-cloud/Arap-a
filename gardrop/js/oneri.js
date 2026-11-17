@@ -39,14 +39,28 @@ function gruplar(parcalar) {
   for (const p of parcalar) g[rolu(p)]?.push(p);
   return g;
 }
-// Gövde: üst+alt ya da tek parça. Ayakkabı varsa eklenir. Dış giyim gerekiyorsa eklenir.
-function* adaylar(g, { dis }) {
-  const govdeler = [];
-  for (const u of g.ust) for (const a of g.alt) govdeler.push([u, a]);
-  for (const t of g.tek) govdeler.push([t]);
+// Gövde: üst+alt ya da tek parça; varsa ayakkabı; gerekiyorsa dış giyim.
+// Toplam aday sayısı sınırı aşarsa sabit sırayla kesmek yerine rastgele örneklenir (her gövde türü şansa sahip olur).
+function* adaylar(g, { dis }, ust_sinir = Infinity, rastgele = Math.random) {
   const ayak = g.ayakkabi.length ? g.ayakkabi : [null];
   const disl = dis && g.dis.length ? g.dis : [null];
-  for (const gv of govdeler) for (const ay of ayak) for (const d of disl) yield [...gv, ay, d].filter(Boolean);
+  const ciftSayisi = g.ust.length * g.alt.length;
+  const govdeSayisi = ciftSayisi + g.tek.length;
+  const toplam = govdeSayisi * ayak.length * disl.length;
+  const kur = (i) => {
+    const d = disl[i % disl.length]; i = Math.floor(i / disl.length);
+    const ay = ayak[i % ayak.length]; i = Math.floor(i / ayak.length);
+    const govde = i < ciftSayisi ? [g.ust[i % g.ust.length], g.alt[Math.floor(i / g.ust.length)]] : [g.tek[i - ciftSayisi]];
+    return [...govde, ay, d].filter(Boolean);
+  };
+  if (toplam <= ust_sinir) { for (let i = 0; i < toplam; i++) yield kur(i); return; }
+  const gorulen = new Set();
+  for (let n = 0; n < ust_sinir * 3 && gorulen.size < ust_sinir; n++) {
+    const i = Math.floor(rastgele() * toplam);
+    if (gorulen.has(i)) continue;
+    gorulen.add(i);
+    yield kur(i);
+  }
 }
 const anaRenk = (p) => p.renkler?.[0];
 const desenli = (p) => p.desen && p.desen !== "duz";
@@ -94,9 +108,7 @@ export function oner(parcalar, kosul = {}, baglam = {}, { adet = 5, ust_sinir = 
   const kotu = begenilmeyenler(baglam.kombinler);
   const dis = disGerekli(kosul.sicaklik, kosul.mevsim);
   const sonuc = [];
-  let i = 0;
-  for (const aday of adaylar(g, { dis })) {
-    if (i++ > ust_sinir) break;
+  for (const aday of adaylar(g, { dis }, ust_sinir, rastgele)) {
     if (kotu.has(anahtar(aday.map((p) => p.id)))) continue;
     const { puan, nedenler } = puanla(aday, baglam, kosul);
     sonuc.push({ parcalar: aday.map((p) => p.id), puan: puan + rastgele() * 0.03, nedenler });
@@ -129,22 +141,41 @@ export function karistir(parcalar, kosul = {}, baglam = {}, rastgele = Math.rand
   return null;
 }
 
-// K7: kapsüldeki parçalarla kurulabilen uyumlu kombin sayısı (dış giyim ve aksesuar sayılmaz).
-export function kapsulKombinleri(parcalar, { esik = 0.5, ust_sinir = 20000 } = {}) {
-  const g = gruplar(parcalar.filter((p) => !p.arsiv));
-  const liste = [];
-  let i = 0;
-  for (const aday of adaylar(g, { dis: false })) {
-    if (i++ > ust_sinir) break;
-    if (renkUyumu(aday.map(anaRenk)).puan >= esik) liste.push(aday.map((p) => p.id));
+// K7: kapsüldeki parçalarla kurulabilen renk uyumlu kombinler (dış giyim ve aksesuar sayılmaz).
+// Uyum yalnız ana renklere bağlı olduğundan parçalar (rol, renk) gruplarına ayrılır ve grup kombinasyonları
+// sayılır; böylece büyük gardropta da tam sayım yapılır. odak: yalnız bu parçayı içeren kombinleri say.
+export function kapsulAnalizi(parcalar, { esik = 0.5, ornekSayisi = 12, odak = null } = {}) {
+  const grup = (rol) => {
+    const m = new Map();
+    for (const p of parcalar) if (!p.arsiv && rolu(p) === rol) {
+      if (odak && rolu(odak) === rol && p.id !== odak.id) continue;
+      const r = anaRenk(p) || "";
+      (m.get(r) || m.set(r, []).get(r)).push(p);
+    }
+    return [...m.entries()];
+  };
+  const [ust, alt, tek] = [grup("ust"), grup("alt"), grup("tek")];
+  let ayak = grup("ayakkabi");
+  if (!ayak.length) { if (odak && rolu(odak) === "ayakkabi") return { sayi: 0, ornekler: [], kullanilan: new Set() }; ayak = [[null, [null]]]; }
+  const govdeler = [];
+  if (!odak || ["ust", "alt", "ayakkabi"].includes(rolu(odak))) for (const u of ust) for (const a of alt) govdeler.push([u, a]);
+  if (!odak || ["tek", "ayakkabi"].includes(rolu(odak))) for (const t of tek) govdeler.push([t]);
+  let sayi = 0;
+  const ornekler = [], kullanilan = new Set();
+  for (const gv of govdeler) for (const ay of ayak) {
+    const kume = ay[0] === null && ay[1][0] === null ? gv : [...gv, ay];
+    if (renkUyumu(kume.map(([r]) => r || null)).puan < esik) continue;
+    sayi += kume.reduce((n, [, l]) => n * l.length, 1);
+    for (const [, l] of kume) for (const p of l) kullanilan.add(p.id);
+    if (ornekler.length < ornekSayisi) ornekler.push(kume.map(([, l]) => l[ornekler.length % l.length].id));
   }
-  return liste;
+  return { sayi, ornekler, kullanilan };
 }
 
 // S3: aday parça gardroba eklenince kaç yeni uyumlu kombin açılır.
 export function almadanTest(parcalar, aday) {
-  const once = kapsulKombinleri(parcalar).length;
-  const sonra = kapsulKombinleri([...parcalar, { ...aday, id: "__aday__" }]);
-  const yeni = sonra.filter((k) => k.includes("__aday__"));
-  return { once, sonra: sonra.length, yeni: yeni.length, ornekler: yeni.slice(0, 6) };
+  const a = { ...aday, id: "__aday__" };
+  const once = kapsulAnalizi(parcalar).sayi;
+  const yeni = kapsulAnalizi([...parcalar, a], { odak: a });
+  return { once, sonra: once + yeni.sayi, yeni: yeni.sayi, ornekler: yeni.ornekler.slice(0, 6) };
 }

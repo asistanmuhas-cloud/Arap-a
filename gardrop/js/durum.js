@@ -26,6 +26,13 @@ export async function giydim({ parcalar, kombin = null, tarih = gunStr(), etkinl
   // Takvimde o güne planlanan kombin varsa giyildi olarak işaretle
   const plan = (await veri.hepsi("plan")).find((p) => p.tarih === tarih && kombin && p.kombin === kombin);
   if (plan) await veri.guncelle("plan", plan.id, { giyildi: true });
+  // Ayar açıksa giysiler kirliye düşer (ayakkabı, dış giyim, aksesuar hariç).
+  if (await veri.ayarOku("giyinceKirli", false)) {
+    for (const id of parcalar) {
+      const p = await veri.getir("parcalar", id);
+      if (p && !["ayakkabi", "aksesuar", "dis"].includes(p.kategori) && (p.durum || "temiz") === "temiz") await veri.guncelle("parcalar", id, { durum: "kirli", durumTarihi: tarih });
+    }
+  }
   return { kayit, yeni: true };
 }
 export async function giyimGeriAl(id) {

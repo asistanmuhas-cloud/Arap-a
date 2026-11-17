@@ -69,13 +69,14 @@ export async function ciz(kok) {
     if (!oge.dosya || oge.hazir) return;
     oge.hazir = await hazirla(oge.dosya);
     oge.orijinal = oge.hazir;
-    if (kok.querySelector("#otomatik").checked) arkaPlan(oge);
+    if (kok.querySelector("#otomatik").checked) oge.apVaat = arkaPlan(oge);
   }
   async function arkaPlan(oge) {
     oge.ap = { durum: "calisiyor", oran: null, metin: "Hazırlanıyor" };
     ciz_ilerleme(oge);
     try {
-      const sonuc = await arkaPlanKaldir(oge.dosya, (oran, metin) => { oge.ap = { durum: "calisiyor", oran, metin }; ciz_ilerleme(oge); });
+      // Tam boy kamera fotoğrafı yerine 1024 px kopya: telefonda bellek ve süre için.
+      const sonuc = await arkaPlanKaldir(oge.orijinal.blob, (oran, metin) => { oge.ap = { durum: "calisiyor", oran, metin }; ciz_ilerleme(oge); });
       oge.temiz = await hazirla(sonuc, { saydam: true });
       oge.hazir = oge.temiz;
       oge.ap = { durum: "tamam" };
@@ -83,7 +84,7 @@ export async function ciz(kok) {
       console.error(e);
       oge.ap = { durum: "hata", metin: "Arka plan silinemedi (" + (e.message || "bilinmeyen hata") + "). Orijinal fotoğraf kullanılacak." };
     }
-    if (kuyruk[sira] === oge) { onizle(oge); renkOner(islemKok, oge.hazir.renkler.map((r) => r.id)); }
+    if (kuyruk[sira] === oge) { onizle(oge); if (!oge.renkElle) renkOner(islemKok, oge.hazir.renkler.map((r) => r.id)); }
   }
   function ciz_ilerleme(oge) {
     if (kuyruk[sira] !== oge) return;
@@ -124,6 +125,8 @@ export async function ciz(kok) {
         <button class="dugme ana genis" type="button" id="kaydet">${ikon.onay}${toplu && sira < kuyruk.length - 1 ? "Kaydet, sonrakine geç" : "Kaydet"}</button>
       </div>`;
     formBagla(islemKok.querySelector("#parca-form"));
+    // Kullanıcı rengi elle seçtiyse geç biten arka plan silme seçimi ezmesin.
+    islemKok.querySelector("#parca-form").addEventListener("click", (e) => { if (e.target.closest('[data-cip-grup="anaRenk"], [data-cip-grup="digerRenk"]')) oge.renkElle = true; });
     islemKok.querySelector("#kaydet").onclick = () => kaydet(oge);
     islemKok.querySelector("#atla")?.addEventListener("click", sonraki);
     islemKok.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -132,7 +135,7 @@ export async function ciz(kok) {
         await isle(oge);
         if (kuyruk[sira] !== oge) return;
         onizle(oge);
-        renkOner(islemKok, oge.hazir.renkler.map((r) => r.id));
+        if (!oge.renkElle) renkOner(islemKok, oge.hazir.renkler.map((r) => r.id));
       } catch (e) {
         islemKok.querySelector("#onizleme").innerHTML = `<p class="hata-kutu">Fotoğraf açılamadı: ${k(e.message)}</p>`;
       }
@@ -145,6 +148,10 @@ export async function ciz(kok) {
     const btn = islemKok.querySelector("#kaydet");
     btn.disabled = true;
     try {
+      if (oge.apVaat && oge.ap?.durum === "calisiyor") {
+        btn.textContent = "Arka plan silme bitince kaydedilecek…";
+        await oge.apVaat;
+      }
       const v = formOku(islemKok.querySelector("#parca-form"));
       let gorsel = null;
       if (oge.hazir) gorsel = await veri.gorselYaz({ blob: oge.hazir.blob, kucuk: oge.hazir.kucuk });

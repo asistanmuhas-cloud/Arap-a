@@ -95,11 +95,11 @@ function eksikCiz(ic, d) {
   const e = eksikAnalizi(d.parcalar);
   ic.innerHTML = `
     <div class="kutu"><div class="satir ara"><h3>Temel parçalar</h3><span class="kucuk soluk">${8 - e.eksik.length}/8 var</span></div>
-      ${e.eksik.length ? `<div class="liste">${e.eksik.map((x) => `<div><span class="metin"><span>${k(x)}</span></span><button class="dugme kucuk" type="button" data-istek="${k(x)}">İstek listesine</button></div>`).join("")}</div>` : `<p class="soluk" style="margin:0">Temel parçaların tamam.</p>`}</div>
+      ${e.eksik.length ? `<div class="liste">${e.eksik.map((x, i) => `<div><span class="metin"><span>${k(x.ad)}</span></span><button class="dugme kucuk" type="button" data-istek="${i}">İstek listesine</button></div>`).join("")}</div>` : `<p class="soluk" style="margin:0">Temel parçaların tamam.</p>`}</div>
     ${e.denge.length ? `<div class="kutu"><h3>Denge</h3>${e.denge.map((x) => `<p style="margin:0">${k(x)}</p>`).join("")}</div>` : ""}
     <div class="kutu"><div class="satir ara"><h3>Kombine girmeyenler</h3><span class="kucuk soluk">${e.kombinSayisi} uyumlu kombin var</span></div>
       ${e.yetim.length ? `<p class="kucuk soluk" style="margin:0">Bu parçalar renk uyumu nedeniyle hiçbir kombine girmiyor. Nötr renkte bir eşlik parçası işe yarayabilir.</p><div class="liste">${e.yetim.map((p) => `<a href="#/parca/${p.id}"><span class="kucuk-gorsel">${parcaGorsel(p)}</span><span class="metin"><span>${k(parcaAdi(p))}</span></span></a>`).join("")}</div>` : `<p class="soluk" style="margin:0">Her üst ve alt parça en az bir kombine giriyor.</p>`}</div>`;
-  ic.querySelectorAll("[data-istek]").forEach((b) => (b.onclick = async () => { await veri.kaydet("istek", { ad: b.dataset.istek, kategori: "ust", renkler: [] }); bildir("İstek listesine eklendi"); b.disabled = true; }));
+  ic.querySelectorAll("[data-istek]").forEach((b) => (b.onclick = async () => { const x = e.eksik[+b.dataset.istek]; await veri.kaydet("istek", { ad: x.ad, kategori: x.kategori, altKategori: x.alt, renkler: x.renk ? [x.renk] : [] }); bildir("İstek listesine eklendi"); b.disabled = true; }));
 }
 
 function cikarCiz(ic, d) {

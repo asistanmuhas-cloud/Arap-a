@@ -47,8 +47,6 @@ export async function ciz(kok, [id]) {
     if (bugun) await giyimGeriAl(bugun.id);
     else {
       await giydim({ parcalar: x.parcalar, kombin: x.id });
-      const kirli = await veri.ayarOku("giyinceKirli", false);
-      if (kirli) for (const p of parcalar) if (p.kategori !== "ayakkabi" && p.kategori !== "aksesuar" && p.kategori !== "dis") await veri.guncelle("parcalar", p.id, { durum: "kirli", durumTarihi: gunStr() });
     }
     bildir(bugun ? "Geri alındı" : "Bugün giyildi olarak kaydedildi");
     yenile();

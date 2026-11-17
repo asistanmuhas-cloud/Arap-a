@@ -3,7 +3,7 @@
 # çevrimdışı çalışma HTTPS ister.
 # Kullanım (repo kökünde, root olarak):
 #   sudo bash gardrop/deploy/kur.sh gardrop.ornek.com            # arka plan modeli CDN'den (staticimgly.com)
-#   sudo bash gardrop/deploy/kur.sh gardrop.ornek.com --model    # modeli sunucuya kopyala (~130 MB, npm gerekir)
+#   sudo bash gardrop/deploy/kur.sh gardrop.ornek.com --model    # modeli sunucuya kopyala (~210 MB, npm gerekir; önerilir)
 # Güncelleme: git pull && aynı komut.
 set -euo pipefail
 
@@ -41,18 +41,21 @@ server {
     server_name $ALAN;
     root $HEDEF;
     index index.html;
-    types { application/manifest+json webmanifest; application/wasm wasm; }
+    # types{} sunucu düzeyinde genel MIME tablosunu ezer; bu yüzden yalnız ilgili konumlarda tanımlanır.
+    location ~ \.webmanifest\$ { types { } default_type application/manifest+json; add_header Cache-Control "no-cache"; }
+    location ~ \.wasm\$ { types { } default_type application/wasm; add_header Cache-Control "public, max-age=31536000, immutable"; }
     location = /sw.js { add_header Cache-Control "no-cache"; }
     location /vendor/arka-plan-veri/ { add_header Cache-Control "public, max-age=31536000, immutable"; }
     location / { try_files \$uri \$uri/ /index.html; add_header Cache-Control "no-cache"; }
 }
 EOF
-  if ! nginx -t; then rm -f "$KONF"; echo "nginx ayarı geçersiz; eklenen dosya geri alındı"; exit 1; fi
+  nginx -t || { rm -f "$KONF"; echo "nginx -t başarısız; $KONF geri alındı"; exit 1; }
 fi
 systemctl reload nginx
+curl -fsS -o /dev/null -H "Host: $ALAN" http://127.0.0.1/ || { echo "site yanıt vermiyor"; exit 1; }
 if command -v certbot >/dev/null; then
-  certbot --nginx -d "$ALAN" --non-interactive --agree-tos --register-unsafely-without-email --redirect || echo "certbot başarısız; HTTPS'i elle kur"
+  certbot --nginx -d "$ALAN" --redirect || echo "certbot başarısız; DNS kaydını kontrol edip 'certbot --nginx -d $ALAN' ile yeniden dene"
 else
-  echo "certbot yok: telefona kurulum ve kamera için HTTPS gerekir."
+  echo "UYARI: certbot yok. Telefona kurulum, kamera ve çevrimdışı çalışma HTTPS ister."
 fi
 echo "Hazır: https://$ALAN"

@@ -52,8 +52,17 @@ X4
 - Dil: Türkçe.
 
 ## Durum
-- Bulut senkron: istemci sahte sunucuyla iki cihaz arasında denendi (kayıt, silme, fotoğraf); gerçek Supabase projesiyle denenmedi.
-- Testler: `npm test` (mantık), `node test/tarayici.cjs` ve `node test/senkron-sahte.cjs` (Playwright, `python3 -m http.server 8822` ile).
+Her [x] maddesi telefon boyutunda tarayıcı testinde tıklanarak denendi (`test/tarayici.cjs`, Chromium, Android
+öykünmesi, İstanbul saat dilimi). Mantık birim testleri: `npm test`.
+
+Denenmeyenler:
+- E7 ve bulut senkron gerçek bir Supabase projesiyle denenmedi. Senkron istemcisi sahte sunucuyla iki cihaz arasında
+  denendi (`test/senkron-sahte.cjs`: kayıt, silme, fotoğraf). `urun-cek` fonksiyonu hiç çalıştırılmadı.
+- iPhone / Safari denenmedi.
+- Arka plan modelinin varsayılan CDN adresine (staticimgly.com) bu ortamdan ulaşılamadı; `kur.sh --model` önerilir.
+
+Çalıştırma: `python3 -m http.server 8822` (gardrop/ içinde), sonra `node test/tarayici.cjs`.
+Arka plan testi için model: `npm pack @imgly/background-removal-data@1.4.5` → `package/dist` → `vendor/arka-plan-veri`.
 
 ## Dilimler
 1. E1 E3 E6 G1–G4 K1 K3 K6 A1 X1

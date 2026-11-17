@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renkUyumu, enYakinRenk, baskinRenkler } from "../js/renk.js";
-import { oner, karistir, kapsulKombinleri, almadanTest, sicaklikUygun, mevsimBul } from "../js/oneri.js";
+import { oner, karistir, kapsulAnalizi, almadanTest, sicaklikUygun, mevsimBul } from "../js/oneri.js";
 import { giyimHaritasi, giyimBasiMaliyet, unutulanlar, tekrarUyarisi, eksikAnalizi, eldenCikarma, istatistik, hatirlatmalar } from "../js/analiz.js";
 
 const P = (id, kategori, renk, ek = {}) => ({ id, kategori, renkler: [renk], durum: "temiz", ...ek });
@@ -65,7 +65,7 @@ test("karıştır geçerli kombin döner", () => {
 });
 
 test("kapsül ve almadan önce test", () => {
-  const n = kapsulKombinleri(gardrop).length;
+  const n = kapsulAnalizi(gardrop).sayi;
   assert.ok(n >= 4);
   const t = almadanTest(gardrop, { kategori: "alt", renkler: ["siyah"], altKategori: "Pantolon" });
   assert.equal(t.once, n);
@@ -92,12 +92,41 @@ test("tekrar uyarısı: aynı etkinlik güçlü", () => {
 
 test("eksik analizi, elden çıkarma, istatistik, hatırlatma", () => {
   const e = eksikAnalizi(gardrop);
-  assert.ok(e.eksik.includes("Ara mevsim ceketi"));
-  assert.ok(!e.eksik.includes("Spor ayakkabı"));
+  assert.ok(e.eksik.some((x) => x.ad === "Ara mevsim ceketi" && x.kategori === "dis"));
+  assert.ok(!e.eksik.some((x) => x.ad === "Spor ayakkabı"));
   const c = eldenCikarma([{ id: "z", kategori: "ust", renkler: ["beyaz"], alisTarihi: "2025-01-01" }], new Map(), "2026-11-17");
   assert.equal(c.length, 1);
   const s = istatistik(gardrop, [{ tarih: "2026-11-01", parcalar: ["u1"] }], "2026-11-17");
   assert.equal(s.toplam, 7); assert.equal(s.aylar.at(-1).n, 1);
   const hz = hatirlatmalar([{ id: "t", durum: "terzi", teslimTarihi: "2026-11-17" }], "2026-11-17");
   assert.equal(hz[0].acil, true);
+});
+
+test("büyük gardrop: elbise önerilebilir, sayım tam", () => {
+  const renkler = ["beyaz", "siyah", "gri", "lacivert", "bej", "kirmizi", "yesil", "mavi"];
+  const l = [];
+  for (let i = 0; i < 40; i++) l.push(P("u" + i, "ust", renkler[i % 8]));
+  for (let i = 0; i < 30; i++) l.push(P("a" + i, "alt", renkler[(i + 3) % 8]));
+  for (let i = 0; i < 12; i++) l.push(P("s" + i, "ayakkabi", renkler[i % 4]));
+  for (let i = 0; i < 8; i++) l.push(P("d" + i, "dis", renkler[i % 4]));
+  for (let i = 0; i < 6; i++) l.push(P("t" + i, "tek", renkler[i % 8]));
+  for (let i = 0; i < 4; i++) l.push(P("ak" + i, "aksesuar", "siyah"));
+  assert.ok(l.length >= 100);
+  let tohum = 7; const r = () => ((tohum = (tohum * 16807) % 2147483647) / 2147483647);
+  const s = oner(l, { sicaklik: 8 }, {}, { adet: 50, rastgele: r });
+  // 40×30+6 gövde × 12 ayakkabı × 8 mont = 115.776 aday; elbiseler de örneklemde olmalı
+  const tum = []; for (let i = 0; i < 20; i++) tum.push(...oner(l, { sicaklik: 8 }, {}, { adet: 200, rastgele: r }));
+  assert.ok(tum.some((k) => k.parcalar.some((id) => id.startsWith("t"))), "elbise hiç önerilmedi");
+  assert.ok(s.every((k) => k.parcalar.some((id) => id.startsWith("d"))));
+  // kapsül sayımı kaba kuvvetle aynı olmalı
+  const ana = kapsulAnalizi(l);
+  let kaba = 0;
+  const rol = (k) => l.filter((p) => p.kategori === k);
+  for (const u of rol("ust")) for (const a of rol("alt")) for (const sh of rol("ayakkabi")) if (renkUyumu([u, a, sh].map((p) => p.renkler[0])).puan >= 0.5) kaba++;
+  for (const t of rol("tek")) for (const sh of rol("ayakkabi")) if (renkUyumu([t, sh].map((p) => p.renkler[0])).puan >= 0.5) kaba++;
+  assert.equal(ana.sayi, kaba);
+  // almadan önce test: odaklı sayım = fark
+  const aday = { kategori: "alt", renkler: ["bej"] };
+  const t = almadanTest(l, aday);
+  assert.equal(t.sonra, kapsulAnalizi([...l, { ...aday, id: "x" }]).sayi);
 });
