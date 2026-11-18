@@ -1,7 +1,7 @@
 // Çevrimdışı çalışma: uygulama kabuğu önceden önbelleğe alınır; arka plan modeli ilk kullanımda önbelleğe girer.
 const SURUM = "gardrop-v1";
 const KABUK = [
-  "./", "index.html", "manifest.webmanifest", "ikon.svg", "ikon-192.png", "css/app.css",
+  "./", "index.html", "manifest.webmanifest", "ikon.svg", "ikon-180.png", "ikon-192.png", "ikon-512.png", "css/app.css",
   "js/app.js", "js/veri.js", "js/ui.js", "js/durum.js", "js/sabitler.js", "js/renk.js", "js/oneri.js", "js/analiz.js",
   "js/gorsel.js", "js/hava.js", "js/yedek.js", "js/senkron.js",
   "js/gorunum/bugun.js", "js/gorunum/gardrop.js", "js/gorunum/parca.js", "js/gorunum/parca-form.js", "js/gorunum/ekle.js",

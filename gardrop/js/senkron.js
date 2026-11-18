@@ -14,10 +14,14 @@ export async function kur(url, anahtar) {
   if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url) && !/^https:\/\//.test(url)) throw new Error("Adres https:// ile başlamalı (ör. https://xyz.supabase.co)");
   await ayarYaz({ ...(await ayar()), url, anahtar: anahtar.trim() });
 }
+// İmleç, gönderim zamanı ve yüklü fotoğraf listesi tek bir hesap + projeye aittir; değişince baştan eşitlenir.
+async function durumSifirla() {
+  for (const a of ["senkronImlec", "senkronGonderim", "senkronGorseller", "senkronSon", "senkronHata"]) await veri.ayarYaz(a, null);
+}
 export async function kaldir() {
   await ayarYaz(null);
-  await veri.ayarYaz("senkronImlec", null);
-  await veri.ayarYaz("senkronSon", null);
+  await durumSifirla();
+  await veri.ayarYaz("senkronHesap", null);
 }
 
 async function istek(yol, { yontem = "GET", govde, basliklar = {}, oturumlu = true, ham = false } = {}) {
@@ -37,7 +41,9 @@ async function istek(yol, { yontem = "GET", govde, basliklar = {}, oturumlu = tr
   return t ? JSON.parse(t) : null;
 }
 
-function oturumKaydet(a, j) {
+async function oturumKaydet(a, j) {
+  const hesap = `${a.url}|${j.user?.id || a.oturum?.kullanici || ""}`;
+  if ((await veri.ayarOku("senkronHesap", null)) !== hesap) { await durumSifirla(); await veri.ayarYaz("senkronHesap", hesap); }
   return ayarYaz({ ...a, oturum: { access_token: j.access_token, refresh_token: j.refresh_token, bitis: Date.now() + (j.expires_in || 3600) * 1000, kullanici: j.user?.id } });
 }
 export async function girisYap(eposta, parola, { kayit = false } = {}) {
@@ -116,19 +122,23 @@ async function senkronIc() {
     }
     // Fotoğraflar: parçalarda kullanılan ve henüz yüklenmemiş olanlar
     const parcalar = await veri.hepsi("parcalar", { tumProfiller: true });
+    const fotoHata = [];
     for (const p of parcalar) {
       if (!p.gorsel || yuklu.has(p.gorsel)) continue;
       const g = await veri.gorselOku(p.gorsel);
       if (!g) continue;
-      await istek(`/storage/v1/object/gorseller/${uid}/${g.id}`, { yontem: "POST", govde: g.blob, basliklar: { "x-upsert": "true", "Content-Type": g.blob.type } });
-      if (g.kucuk) await istek(`/storage/v1/object/gorseller/${uid}/${g.id}_k`, { yontem: "POST", govde: g.kucuk, basliklar: { "x-upsert": "true", "Content-Type": g.kucuk.type } });
-      yuklu.add(g.id);
-      await veri.ayarYaz("senkronGorseller", [...yuklu]);
+      // Tek bir fotoğrafın hatası tüm senkronu durdurmasın; sonraki senkronda yeniden denenir.
+      try {
+        await istek(`/storage/v1/object/gorseller/${uid}/${g.id}`, { yontem: "POST", govde: g.blob, basliklar: { "x-upsert": "true", "Content-Type": g.blob.type } });
+        if (g.kucuk) await istek(`/storage/v1/object/gorseller/${uid}/${g.id}_k`, { yontem: "POST", govde: g.kucuk, basliklar: { "x-upsert": "true", "Content-Type": g.kucuk.type } });
+        yuklu.add(g.id);
+        await veri.ayarYaz("senkronGorseller", [...yuklu]);
+      } catch (e) { fotoHata.push(e.message); console.warn("Fotoğraf yüklenemedi", g.id, e); }
     }
     await veri.ayarYaz("senkronGonderim", basla);
     await veri.ayarYaz("senkronGorseller", [...yuklu]);
     await veri.ayarYaz("senkronSon", new Date().toISOString());
-    await veri.ayarYaz("senkronHata", null);
+    await veri.ayarYaz("senkronHata", fotoHata.length ? `${fotoHata.length} fotoğraf yüklenemedi (${fotoHata[0]}); sonraki senkronda yeniden denenecek` : null);
     if (profilDegisti) location.reload();
     return { gonderilen: gidecek.length, cekilen };
   } catch (e) {
@@ -155,6 +165,7 @@ export async function urunCek(url) {
   if (!a?.oturum) return null;
   const j = await istek("/functions/v1/urun-cek", { yontem: "POST", govde: { url } });
   if (!j) return null;
-  const gorsel = j.gorsel ? await (await fetch(j.gorsel)).blob() : null;
+  // Görsel alınamazsa ad, marka ve fiyat yine kullanılır.
+  const gorsel = j.gorsel ? await fetch(j.gorsel).then((r) => (r.ok ? r.blob() : null)).catch(() => null) : null;
   return { ...j, gorsel };
 }

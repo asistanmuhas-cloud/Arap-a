@@ -15,6 +15,7 @@ export async function ciz(kok) {
   const verimli = maliyet.filter((x) => x.m.sayi).sort((a, b) => a.m.maliyet - b.m.maliyet).slice(0, 5);
   const enFazlaAy = Math.max(1, ...s.aylar.map((a) => a.n));
   const enFazlaKat = Math.max(1, ...s.kategori.map((x) => x.n));
+  const enFazlaDeger = Math.max(1, ...s.deger.kategori.map((x) => x.toplam));
   const satir = (p, sag) => `<a href="#/parca/${p.id}"><span class="kucuk-gorsel">${parcaGorsel(p)}</span><span class="metin"><span>${k(parcaAdi(p))}</span></span><span class="kucuk" style="font-variant-numeric:tabular-nums;text-align:right">${sag}</span></a>`;
 
   kok.innerHTML = `
@@ -27,6 +28,12 @@ export async function ciz(kok) {
       <div class="cubuklar">${s.aylar.map((a) => `<div class="cubuk" style="height:${(a.n / enFazlaAy) * 100}%" title="${a.ay}: ${a.n} gün"></div>`).join("")}</div>
       <div class="cubuk-et">${s.aylar.map((a) => `<span>${new Date(a.ay + "-15").toLocaleDateString("tr-TR", { month: "narrow" })}</span>`).join("")}</div>
     </section>
+    ${s.deger.kategori.length ? `<section class="kutu"><div class="satir ara"><h3>Gardrop değeri</h3><span class="kucuk soluk">${para(s.toplamDeger)}</span></div>
+      ${s.deger.kategori.map((x) => `<div class="yatay"><span>${k(x.ad)}</span><span class="iz"><i style="width:${(x.toplam / enFazlaDeger) * 100}%"></i></span><b style="white-space:nowrap">${para(x.toplam)}</b></div>`).join("")}
+      ${s.deger.yillar.length ? `<div class="kucuk soluk">Yıllık harcama (alış tarihine göre, arşivdekiler dahil)</div><div class="liste">${s.deger.yillar.slice(0, 5).map((y) => `<div><span class="metin"><span>${y.yil}</span><small class="soluk">${y.n} parça</small></span><b class="kucuk" style="font-variant-numeric:tabular-nums">${para(y.toplam)}</b></div>`).join("")}</div>` : ""}
+      ${s.deger.arsivGelir ? `<p class="kucuk soluk" style="margin:0">Satılan parçalardan gelen: ${para(s.deger.arsivGelir)}</p>` : ""}
+      ${s.deger.fiyatsiz ? `<p class="kucuk soluk" style="margin:0">${s.deger.fiyatsiz} parçanın fiyatı girilmemiş; toplam bunları içermez.</p>` : ""}
+    </section>` : ""}
     <section class="kutu"><h3>Kategoriler</h3>${s.kategori.map((x) => `<div class="yatay"><span>${k(x.ad)}</span><span class="iz"><i style="width:${(x.n / enFazlaKat) * 100}%"></i></span><b>${x.n}</b></div>`).join("")}</section>
     <section class="kutu"><h3>Renk dağılımı</h3>
       <div style="display:flex;height:22px;border-radius:6px;overflow:hidden;border:1px solid var(--cizgi)">${s.renk.map((r) => `<span title="${k(r.ad)}: ${r.n}" style="flex:${r.n};background:${renkCss(r.id)}"></span>`).join("")}</div>

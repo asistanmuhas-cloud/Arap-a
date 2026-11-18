@@ -14,7 +14,14 @@ command -v nginx >/dev/null || { echo "nginx bulunamadı"; exit 1; }
 KAYNAK="$(cd "$(dirname "$0")/.." && pwd)"
 HEDEF=/var/www/gardrop
 
+MODEL_SURUM=1.4.5
 mkdir -p "$HEDEF"
+# Aynı sürüm model zaten kuruluysa güncellemede yeniden indirilmez (~136 MB).
+ESKI_MODEL="$HEDEF/.arka-plan-veri.eski"
+rm -rf "$ESKI_MODEL"
+if [ "$MODEL" = "--model" ] && [ "$(cat "$HEDEF/vendor/arka-plan-veri/.surum" 2>/dev/null)" = "$MODEL_SURUM" ]; then
+  mv "$HEDEF/vendor/arka-plan-veri" "$ESKI_MODEL"
+fi
 # Uygulama dosyaları (test, plan ve sunucu fonksiyonu yayınlanmaz)
 for x in index.html manifest.webmanifest sw.js ikon.svg ikon-180.png ikon-192.png ikon-512.png css js vendor; do
   rm -rf "${HEDEF:?}/$x"
@@ -22,11 +29,15 @@ for x in index.html manifest.webmanifest sw.js ikon.svg ikon-180.png ikon-192.pn
 done
 rm -rf "$HEDEF/vendor/arka-plan-veri"
 
-if [ "$MODEL" = "--model" ]; then
+if [ -d "$ESKI_MODEL" ]; then
+  mv "$ESKI_MODEL" "$HEDEF/vendor/arka-plan-veri"
+  echo "Model zaten kurulu ($MODEL_SURUM), yeniden indirilmedi"
+elif [ "$MODEL" = "--model" ]; then
   command -v npm >/dev/null || { echo "--model için npm gerekir"; exit 1; }
   GECICI="$(mktemp -d)"
-  (cd "$GECICI" && npm pack -s @imgly/background-removal-data@1.4.5 >/dev/null && tar xzf imgly-background-removal-data-1.4.5.tgz)
+  (cd "$GECICI" && npm pack -s "@imgly/background-removal-data@$MODEL_SURUM" >/dev/null && tar xzf "imgly-background-removal-data-$MODEL_SURUM.tgz")
   cp -r "$GECICI/package/dist" "$HEDEF/vendor/arka-plan-veri"
+  echo "$MODEL_SURUM" > "$HEDEF/vendor/arka-plan-veri/.surum"
   rm -rf "$GECICI"
   echo "Model yerel olarak kuruldu: $HEDEF/vendor/arka-plan-veri"
 fi

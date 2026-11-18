@@ -65,11 +65,15 @@ export async function ciz(kok) {
     goster();
   };
 
-  async function isle(oge) {
-    if (!oge.dosya || oge.hazir) return;
-    oge.hazir = await hazirla(oge.dosya);
-    oge.orijinal = oge.hazir;
-    if (kok.querySelector("#otomatik").checked) oge.apVaat = arkaPlan(oge);
+  // Her öğe bir kez hazırlanır: toplu eklemede arkadaki hazırlık ile ekrandaki aynı vaadi paylaşır.
+  function isle(oge) {
+    if (!oge.dosya) return Promise.resolve();
+    oge.isleVaat ||= hazirla(oge.dosya).then((h) => {
+      oge.hazir = h;
+      oge.orijinal = h;
+      if (kok.querySelector("#otomatik").checked) oge.apVaat = arkaPlan(oge);
+    });
+    return oge.isleVaat;
   }
   async function arkaPlan(oge) {
     oge.ap = { durum: "calisiyor", oran: null, metin: "Hazırlanıyor" };
@@ -148,6 +152,11 @@ export async function ciz(kok) {
     const btn = islemKok.querySelector("#kaydet");
     btn.disabled = true;
     try {
+      // Fotoğraf daha hazırlanmadan Kaydet'e basılırsa fotoğrafsız kayıt olmasın.
+      if (oge.dosya && !oge.hazir) {
+        btn.textContent = "Fotoğraf hazırlanıyor…";
+        await isle(oge).catch(() => {});
+      }
       if (oge.apVaat && oge.ap?.durum === "calisiyor") {
         btn.textContent = "Arka plan silme bitince kaydedilecek…";
         await oge.apVaat;

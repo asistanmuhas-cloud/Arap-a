@@ -4,7 +4,7 @@ import { KATEGORILER, RENKLER, MEVSIMLER, ORTAMLAR, DURUMLAR, RENK, KATEGORI, DU
 import { k, parcaKart, gorselleriDoldur, cipGrubu, cipleriBagla, cipOku, pencere, ikon, renkCss, parcaAdi } from "../ui.js";
 
 export const baslik = "Gardrop";
-const filtre = { kategori: null, renk: [], mevsim: [], ortam: [], durum: [], arsiv: false, metin: "" };
+const filtre = { kategori: null, renk: [], mevsim: [], ortam: [], durum: [], konum: [], arsiv: false, metin: "" };
 
 const normal = (s) => (s || "").toLocaleLowerCase("tr");
 export function filtrele(parcalar, f) {
@@ -16,14 +16,15 @@ export function filtrele(parcalar, f) {
     if (f.mevsim.length && p.mevsimler?.length && !p.mevsimler.some((x) => f.mevsim.includes(x))) return false;
     if (f.ortam.length && !p.ortamlar?.some((x) => f.ortam.includes(x))) return false;
     if (f.durum.length && !f.durum.includes(p.durum || "temiz")) return false;
+    if (f.konum?.length && !f.konum.includes((p.konum || "").trim())) return false;
     if (m) {
-      const metin = normal([parcaAdi(p), p.ad, p.altKategori, KATEGORI[p.kategori]?.ad, p.marka, p.kumas, p.magaza, p.not, ...(p.renkler || []).map((r) => RENK[r]?.ad)].join(" "));
+      const metin = normal([parcaAdi(p), p.ad, p.altKategori, KATEGORI[p.kategori]?.ad, p.marka, p.kumas, p.magaza, p.not, p.konum, ...(p.renkler || []).map((r) => RENK[r]?.ad)].join(" "));
       if (!m.split(/\s+/).every((s) => metin.includes(s))) return false;
     }
     return true;
   });
 }
-const filtreSayisi = () => filtre.renk.length + filtre.mevsim.length + filtre.ortam.length + filtre.durum.length + (filtre.arsiv ? 1 : 0);
+const filtreSayisi = () => filtre.renk.length + filtre.mevsim.length + filtre.ortam.length + filtre.durum.length + filtre.konum.length + (filtre.arsiv ? 1 : 0);
 
 export async function ciz(kok) {
   const d = await yukle();
@@ -64,6 +65,7 @@ export async function ciz(kok) {
     kok.querySelectorAll("#kategoriler .cip").forEach((x) => x.setAttribute("aria-pressed", String(x === c)));
     goster();
   });
+  const konumlar = [...new Set(d.parcalar.map((p) => (p.konum || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "tr"));
   kok.querySelector("#filtre-ac").onclick = async () => {
     const p = pencere({
       baslik: "Filtre",
@@ -72,16 +74,17 @@ export async function ciz(kok) {
         <div class="alan"><span class="etiket-ad">Mevsim</span>${cipGrubu("mevsim", MEVSIMLER, filtre.mevsim)}</div>
         <div class="alan"><span class="etiket-ad">Ortam</span>${cipGrubu("ortam", ORTAMLAR, filtre.ortam)}</div>
         <div class="alan"><span class="etiket-ad">Durum</span>${cipGrubu("durum", DURUMLAR, filtre.durum)}</div>
+        ${konumlar.length ? `<div class="alan"><span class="etiket-ad">Nerede</span>${cipGrubu("konum", konumlar.map((x) => ({ id: x, ad: x })), filtre.konum)}</div>` : ""}
         <div class="alan"><span class="etiket-ad">Göster</span>${cipGrubu("arsiv", [{ id: "aktif", ad: "Gardroptakiler" }, { id: "arsiv", ad: "Arşiv" }], filtre.arsiv ? "arsiv" : "aktif", { coklu: false })}</div>`,
       alt: `<button class="dugme" type="button" id="temizle">Temizle</button><button class="dugme ana" type="button" id="uygula">Uygula</button>`,
     });
     cipleriBagla(p.govde);
     p.govde.querySelector("#temizle").onclick = () => {
-      Object.assign(filtre, { renk: [], mevsim: [], ortam: [], durum: [], arsiv: false });
+      Object.assign(filtre, { renk: [], mevsim: [], ortam: [], durum: [], konum: [], arsiv: false });
       p.kapat(true);
     };
     p.govde.querySelector("#uygula").onclick = () => {
-      for (const a of ["renk", "mevsim", "ortam", "durum"]) filtre[a] = cipOku(p.govde, a) || [];
+      for (const a of ["renk", "mevsim", "ortam", "durum", "konum"]) filtre[a] = cipOku(p.govde, a) || [];
       filtre.arsiv = cipOku(p.govde, "arsiv") === "arsiv";
       p.kapat(true);
     };

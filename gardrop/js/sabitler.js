@@ -85,6 +85,29 @@ export const ARSIV_NEDENLERI = [
   { id: "kayboldu", ad: "Kayboldu" },
 ];
 
+// B1 bakım talimatı. Etiketteki sembollerin metin karşılığı.
+export const YIKAMALAR = [
+  { id: "30", ad: "30°" },
+  { id: "40", ad: "40°" },
+  { id: "60", ad: "60°" },
+  { id: "elde", ad: "Elde" },
+  { id: "yok", ad: "Yıkanmaz" },
+];
+export const UTULER = [
+  { id: "dusuk", ad: "Düşük ısı" },
+  { id: "orta", ad: "Orta ısı" },
+  { id: "yuksek", ad: "Yüksek ısı" },
+  { id: "yok", ad: "Ütülenmez" },
+];
+export const BAKIM_EKLERI = [
+  { id: "kuruTemizleme", ad: "Kuru temizleme" },
+  { id: "makineKurutmaYok", ad: "Kurutma makinesine girmez" },
+  { id: "camasirSuyuYok", ad: "Çamaşır suyu yok" },
+  { id: "tersYikama", ad: "Ters çevirip yıka" },
+];
+// B2: "giyince kirli" ayarı açıkken bu kategoriler tek giyimde kirliye düşmez.
+export const KIRLENMEYEN = ["ayakkabi", "aksesuar", "dis"];
+
 export const UNUTULMA_GUN = 90; // A3
 export const TEKRAR_GUN = 30; // P4
 

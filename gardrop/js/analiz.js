@@ -1,5 +1,5 @@
 // Giyim kaydı ve analiz: A2 A3 A4 P4 S2 S4 B3. Saf fonksiyonlar; tarihler 'YYYY-MM-DD'.
-import { KATEGORI, RENK, DURUM, UNUTULMA_GUN, TEKRAR_GUN } from "./sabitler.js";
+import { KATEGORI, RENK, DURUM, UNUTULMA_GUN, TEKRAR_GUN, KIRLENMEYEN } from "./sabitler.js";
 import { kapsulAnalizi } from "./oneri.js";
 
 export const gunStr = (d = new Date()) => {
@@ -29,6 +29,27 @@ export function sonKombinler(giyimler, bugun = gunStr()) {
     if (d >= 0 && (!m.has(k) || d < m.get(k))) m.set(k, d);
   }
   return m;
+}
+
+// B2 kirli sepeti: parça kaç giyimde yıkanır. Parçaya özel değer genel "giyince kirli" ayarından önce gelir.
+// Dönüş: sayı ya da null (sayılmaz).
+export function yikamaEsigi(p, giyinceKirli = false) {
+  const n = Math.floor(+p.yikamaSiklik);
+  if (n >= 1) return n;
+  return giyinceKirli && !KIRLENMEYEN.includes(p.kategori) ? 1 : null;
+}
+// Bir giyimden sonra parçanın yeni durumu: {kirliSayac, kirli} ya da null (değişmez).
+export function giyimSonrasi(p, giyinceKirli = false) {
+  const esik = yikamaEsigi(p, giyinceKirli);
+  if (!esik || (p.durum || "temiz") !== "temiz") return null;
+  const sayac = (p.kirliSayac || 0) + 1;
+  return sayac >= esik ? { kirliSayac: 0, kirli: true } : { kirliSayac: sayac, kirli: false };
+}
+// Ekranda: "Yıkamaya 2 giyim kaldı" için.
+export function yikamayaKalan(p, giyinceKirli = false) {
+  const esik = yikamaEsigi(p, giyinceKirli);
+  if (!esik || esik === 1 || (p.durum || "temiz") !== "temiz") return null;
+  return esik - (p.kirliSayac || 0);
 }
 
 // A2: fiyat ÷ giyilme. Giyilmediyse maliyet = fiyat.
@@ -81,6 +102,17 @@ export function istatistik(parcalar, giyimler, bugun = gunStr()) {
   const toplamDeger = fiyatli.reduce((a, p) => a + +p.fiyat, 0);
   const giyilen = aktif.filter((p) => harita.get(p.id)?.sayi).length;
   const maliyetler = fiyatli.map((p) => giyimBasiMaliyet(p, harita)).filter((x) => x && x.sayi);
+  // A5: gardrop değeri kategoriye göre (gardroptakiler) ve yıllık harcama (arşivdekiler dahil, alış tarihine göre).
+  const degerKat = new Map();
+  for (const p of fiyatli) { const e = degerKat.get(p.kategori) || { id: p.kategori, ad: KATEGORI[p.kategori]?.ad || p.kategori, toplam: 0, n: 0 }; e.toplam += +p.fiyat; e.n++; degerKat.set(p.kategori, e); }
+  const yillar = new Map();
+  for (const p of parcalar) {
+    if (p.fiyat == null || p.fiyat === "" || isNaN(+p.fiyat)) continue;
+    const y = (p.alisTarihi || "").slice(0, 4);
+    if (!/^\d{4}$/.test(y)) continue;
+    const e = yillar.get(y) || { yil: y, toplam: 0, n: 0 }; e.toplam += +p.fiyat; e.n++; yillar.set(y, e);
+  }
+  const arsivGelir = parcalar.reduce((a, p) => a + (p.arsiv?.satis > 0 ? +p.arsiv.satis : 0), 0);
   return {
     toplam: aktif.length,
     arsiv: parcalar.length - aktif.length,
@@ -89,6 +121,12 @@ export function istatistik(parcalar, giyimler, bugun = gunStr()) {
     enCok: sirali.slice(0, 5).filter((x) => x.sayi),
     enAz: sirali.slice().reverse().slice(0, 5),
     aylar, toplamDeger,
+    deger: {
+      kategori: [...degerKat.values()].sort((a, b) => b.toplam - a.toplam),
+      yillar: [...yillar.values()].sort((a, b) => b.yil.localeCompare(a.yil)),
+      fiyatsiz: aktif.length - fiyatli.length,
+      arsivGelir,
+    },
     ortMaliyet: maliyetler.length ? maliyetler.reduce((a, m) => a + m.maliyet, 0) / maliyetler.length : null,
   };
 }

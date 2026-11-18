@@ -1,3 +1,5 @@
+/* hidden özniteliği .satir/.alan gibi display kurallarına yenilmesin */
+[hidden] { display: none !important; }
 /* Gardrop — mobil öncelikli. Üst çubuk + içerik + alt sekmeler; parça kartları kare görsel ızgarası. */
 :root {
   --bg: #f4f5f7; --yuzey: #ffffff; --yuzey2: #eceef2; --cizgi: #dfe2e8;

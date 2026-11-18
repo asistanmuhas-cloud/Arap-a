@@ -9,7 +9,8 @@ process.chdir(__dirname);
   p.on('pageerror', (e) => hatalar.push('pageerror: ' + e.message));
   p.on('console', (m) => { if (m.type() === 'error') hatalar.push('console: ' + m.text().slice(0, 200)); });
   const bugun = new Date();
-  const gun = (i) => { const d = new Date(bugun); d.setDate(d.getDate() + i); return d.toISOString().slice(0, 10); };
+  // Uygulama yerel tarih kullanır (gece yarısından sonra UTC ile bir gün kayar).
+  const gun = (i) => { const d = new Date(bugun); d.setDate(d.getDate() + i); return d.toLocaleDateString('sv-SE', { timeZone: 'Europe/Istanbul' }); };
   await ctx.route('https://api.open-meteo.com/**', (r) => r.fulfill({ json: { current: { temperature_2m: 9, weather_code: 3 }, daily: { time: [0, 1, 2, 3, 4, 5, 6].map(gun), temperature_2m_max: [12, 13, 11, 10, 14, 15, 12], temperature_2m_min: [5, 6, 4, 3, 7, 8, 5], precipitation_probability_max: [10, 60, 0, 0, 20, 0, 0], weather_code: [3, 63, 1, 0, 2, 0, 1] } } }));
   await ctx.route('https://geocoding-api.open-meteo.com/**', (r) => r.fulfill({ json: { results: [{ name: 'İstanbul', admin1: 'İstanbul', country: 'Türkiye', latitude: 41.01, longitude: 28.97 }] } }));
   const adim = async (ad, fn) => {

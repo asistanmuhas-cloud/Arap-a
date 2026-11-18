@@ -20,7 +20,7 @@ export async function iceAktar(dosya) {
   let kayit = 0, gorsel = 0;
   for (const d of veri.DEPOLAR) if (Array.isArray(j.depolar?.[d])) kayit += await veri.hamYaz(d, j.depolar[d]);
   for (const g of j.gorseller || []) {
-    if (await veri.gorselOku(g.id)) continue;
+    if (!veri.gecerliKayit(g) || (await veri.gorselOku(g.id))) continue;
     await veri.gorselYaz({ id: g.id, guncelleme: g.guncelleme, blob: await blobYap(g.blob), kucuk: await blobYap(g.kucuk) });
     gorsel++;
   }

@@ -37,8 +37,14 @@
 - [x] X2 Kombin görseli paylaş
 - [x] X3 Çoklu profil
 
+## İkinci sürüm
+- [x] G6 Konum: parçanın durduğu yer; öneri listesi, filtre, aramada ve bavul listesinde görünür
+- [x] A5 Gardrop değeri: kategoriye göre değer, yıllık harcama, satışlardan gelen
+- [x] B1 Bakım talimatı: yıkama, ütü, ek uyarılar (etiket sembollerinin metni)
+- [x] B2 Kirli sepeti: parçaya "kaç giyimde yıkanır"; dolunca kirliye düşer, geri alınca sayaç geri gelir
+
 ## Sonra
-E4, G6, K2, K5, K8 (sanal deneme), P5, A5, B1, B2
+E4 (YZ etiketleme), K2 (kolaj tuvali), K5 (YZ stilist), K8 (sanal deneme), P5 (sabah bildirimi)
 
 ## Yok
 X4

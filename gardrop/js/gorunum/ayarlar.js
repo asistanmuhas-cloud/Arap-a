@@ -31,6 +31,7 @@ export async function ciz(kok) {
   <section class="kutu"><h3>Tercihler</h3>
     <label class="satir"><input type="checkbox" id="otomatik" ${otomatik ? "checked" : ""}> Fotoğraf eklerken arka planı otomatik sil</label>
     <label class="satir"><input type="checkbox" id="kirli" ${kirli ? "checked" : ""}> Kombini giyince giysileri "kirli" yap (ayakkabı, dış giyim, aksesuar hariç)</label>
+    <p class="kucuk soluk" style="margin:0">Kot gibi birkaç giyimde yıkanan parçalar için parçayı düzenleyip "Kaç giyimde yıkanır" alanını doldur; bu ayardan önce gelir.</p>
     <button class="dugme" type="button" id="hepsi-temiz">Tüm kirlileri temiz yap</button>
   </section>
 
@@ -87,7 +88,7 @@ export async function ciz(kok) {
   kok.querySelector("#kirli").onchange = (e) => veri.ayarYaz("giyinceKirli", e.target.checked);
   kok.querySelector("#hepsi-temiz").onclick = async () => {
     const l = (await veri.hepsi("parcalar")).filter((p) => p.durum === "kirli");
-    for (const p of l) await veri.guncelle("parcalar", p.id, { durum: "temiz", durumTarihi: gunStr() });
+    for (const p of l) await veri.guncelle("parcalar", p.id, { durum: "temiz", durumTarihi: gunStr(), kirliSayac: 0 });
     bildir(`${l.length} parça temiz`);
   };
   // Profiller

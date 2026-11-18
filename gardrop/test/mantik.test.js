@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renkUyumu, enYakinRenk, baskinRenkler } from "../js/renk.js";
 import { oner, karistir, kapsulAnalizi, almadanTest, sicaklikUygun, mevsimBul } from "../js/oneri.js";
-import { giyimHaritasi, giyimBasiMaliyet, unutulanlar, tekrarUyarisi, eksikAnalizi, eldenCikarma, istatistik, hatirlatmalar } from "../js/analiz.js";
+import { giyimHaritasi, giyimBasiMaliyet, unutulanlar, tekrarUyarisi, eksikAnalizi, eldenCikarma, istatistik, hatirlatmalar, yikamaEsigi, giyimSonrasi, yikamayaKalan } from "../js/analiz.js";
 
 const P = (id, kategori, renk, ek = {}) => ({ id, kategori, renkler: [renk], durum: "temiz", ...ek });
 const gardrop = [
@@ -129,4 +129,32 @@ test("büyük gardrop: elbise önerilebilir, sayım tam", () => {
   const aday = { kategori: "alt", renkler: ["bej"] };
   const t = almadanTest(l, aday);
   assert.equal(t.sonra, kapsulAnalizi([...l, { ...aday, id: "x" }]).sayi);
+});
+
+test("B2 kirli sepeti: yıkama sıklığı ve genel ayar", () => {
+  const kot = P("k", "alt", "denim", { yikamaSiklik: 3 });
+  assert.equal(yikamaEsigi(kot, false), 3);
+  assert.equal(yikamaEsigi(P("t", "ust", "beyaz"), false), null);
+  assert.equal(yikamaEsigi(P("t", "ust", "beyaz"), true), 1);
+  assert.equal(yikamaEsigi(P("ay", "ayakkabi", "siyah"), true), null); // ayakkabı tek giyimde kirlenmez
+  assert.deepEqual(giyimSonrasi(kot, false), { kirliSayac: 1, kirli: false });
+  assert.deepEqual(giyimSonrasi({ ...kot, kirliSayac: 2 }, false), { kirliSayac: 0, kirli: true });
+  assert.equal(giyimSonrasi({ ...kot, durum: "kirli" }, false), null);
+  assert.equal(yikamayaKalan({ ...kot, kirliSayac: 1 }), 2);
+  assert.equal(yikamayaKalan(P("t", "ust", "beyaz"), true), null);
+});
+
+test("A5 gardrop değeri: kategori ve yıl", () => {
+  const l = [
+    P("x1", "ust", "beyaz", { fiyat: 500, alisTarihi: "2025-03-01" }),
+    P("x2", "ust", "siyah", { fiyat: 300, alisTarihi: "2026-01-10" }),
+    P("x3", "alt", "denim", { fiyat: 1000, alisTarihi: "2026-05-01" }),
+    P("x4", "alt", "siyah", { fiyat: 800, alisTarihi: "2024-02-02", arsiv: { neden: "satildi", satis: 250 } }),
+    P("x5", "ayakkabi", "beyaz"),
+  ];
+  const d = istatistik(l, []).deger;
+  assert.deepEqual(d.kategori.map((x) => [x.id, x.toplam]), [["alt", 1000], ["ust", 800]]);
+  assert.deepEqual(d.yillar.map((y) => [y.yil, y.toplam]), [["2026", 1300], ["2025", 500], ["2024", 800]]);
+  assert.equal(d.arsivGelir, 250);
+  assert.equal(d.fiyatsiz, 1);
 });

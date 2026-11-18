@@ -44,12 +44,15 @@ export function renkCikar(c) {
 let kutuphane = null, veriYolu = null;
 async function veriYoluBul() {
   if (veriYolu) return veriYolu;
+  // GET: servis çalışanı yalnız GET'i önbellekten verir; çevrimdışıyken de yerel model bulunur.
+  // Yalnız yerel yol hatırlanır; ağ hatasında sonraki denemede yerel yeniden yoklanır.
   const yerel = new URL("vendor/arka-plan-veri/", document.baseURI).href;
   try {
-    const r = await fetch(yerel + "resources.json", { method: "HEAD" });
-    veriYolu = r.ok ? yerel : UZAK_VERI;
-  } catch { veriYolu = UZAK_VERI; }
-  return veriYolu;
+    const r = await fetch(yerel + "resources.json");
+    return (veriYolu = r.ok ? yerel : UZAK_VERI); // sunucu gerçekten yanıt verdiyse karar kalıcı
+  } catch {
+    return UZAK_VERI;
+  }
 }
 // E2. İlk kullanımda ~55 MB model iner (tarayıcı önbelleğinde kalır). ilerleme(oran, metin)
 export async function arkaPlanKaldir(blob, ilerleme = () => {}) {

@@ -1,6 +1,7 @@
 // Parça bilgi formu (G1 G2 G3). Ekleme ve düzenleme ortak kullanır.
-import { KATEGORILER, KATEGORI, RENKLER, MEVSIMLER, ORTAMLAR, KUMASLAR, DESENLER } from "../sabitler.js";
+import { KATEGORILER, KATEGORI, RENKLER, MEVSIMLER, ORTAMLAR, KUMASLAR, DESENLER, YIKAMALAR, UTULER, BAKIM_EKLERI } from "../sabitler.js";
 import { k, cipGrubu, cipleriBagla, cipOku, renkCss } from "../ui.js";
+import * as veri from "../veri.js";
 
 const renkSecenek = RENKLER.map((r) => ({ id: r.id, ad: r.ad, renk: renkCss(r.id) }));
 
@@ -32,6 +33,17 @@ function detayHtml(p) {
     <div class="alan"><label for="f-magaza">Mağaza</label><input type="text" id="f-magaza" value="${k(p.magaza)}"></div>
     <div class="alan"><label for="f-link">Ürün linki</label><input type="url" id="f-link" value="${k(p.link)}" placeholder="https://"></div>
   </div>
+  <div class="iki">
+    <div class="alan"><label for="f-konum">Nerede duruyor</label><input type="text" id="f-konum" value="${k(p.konum)}" list="f-konumlar" placeholder="Ör. Yatak odası dolabı, kışlık kutu"><datalist id="f-konumlar"></datalist></div>
+    <div class="alan"><label for="f-yikama-siklik">Kaç giyimde yıkanır</label><input type="number" inputmode="numeric" min="1" max="30" step="1" id="f-yikama-siklik" value="${k(p.yikamaSiklik ?? "")}" placeholder="Boş: ayara göre"></div>
+  </div>
+  <details ${p.bakim && Object.values(p.bakim).some((v) => v && (!Array.isArray(v) || v.length)) ? "open" : ""}><summary class="kucuk soluk">Bakım talimatı (etiketteki semboller)</summary>
+    <div class="yigin" style="gap:10px;margin-top:8px">
+      <div class="alan"><span class="etiket-ad">Yıkama</span>${cipGrubu("yikama", YIKAMALAR, p.bakim?.yikama, { coklu: false })}</div>
+      <div class="alan"><span class="etiket-ad">Ütü</span>${cipGrubu("utu", UTULER, p.bakim?.utu, { coklu: false })}</div>
+      <div class="alan"><span class="etiket-ad">Diğer</span>${cipGrubu("bakimEk", BAKIM_EKLERI, p.bakim?.ekler || [])}</div>
+    </div>
+  </details>
   <div class="alan"><label for="f-not">Not</label><textarea id="f-not">${k(p.not)}</textarea></div>`;
 }
 function altKatHtml(kat, secili) {
@@ -39,6 +51,11 @@ function altKatHtml(kat, secili) {
 }
 
 export function formBagla(kok) {
+  // G6: daha önce yazılan konumlar öneri olarak çıkar.
+  const dl = kok.querySelector("#f-konumlar");
+  if (dl) veri.hepsi("parcalar").then((l) => {
+    dl.innerHTML = [...new Set(l.map((p) => (p.konum || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "tr")).map((x) => `<option value="${k(x)}">`).join("");
+  }).catch(() => {});
   cipleriBagla(kok, (ad, deger) => {
     if (ad === "kategori") {
       if (!deger) { kok.querySelector('[data-cip-grup="kategori"] .cip').setAttribute("aria-pressed", "true"); deger = "ust"; }
@@ -72,6 +89,9 @@ export function formOku(kok) {
       ad: deger("f-ad"), kumas: deger("f-kumas"), marka: deger("f-marka"),
       fiyat: fiyat === "" ? null : +fiyat, beden: deger("f-beden"), alisTarihi: deger("f-tarih"),
       magaza: deger("f-magaza"), link: deger("f-link"), not: deger("f-not"),
+      konum: deger("f-konum"),
+      yikamaSiklik: +deger("f-yikama-siklik") >= 1 ? Math.min(30, Math.floor(+deger("f-yikama-siklik"))) : null,
+      bakim: { yikama: cipOku(kok, "yikama"), utu: cipOku(kok, "utu"), ekler: cipOku(kok, "bakimEk") || [] },
     });
   }
   return v;

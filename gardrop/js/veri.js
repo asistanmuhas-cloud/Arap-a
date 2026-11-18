@@ -108,8 +108,13 @@ export async function sil(depo, id) {
   return guncelle(depo, id, { silindi: true });
 }
 // Senkron ve yedekten içe aktarma: guncelleme alanına dokunmadan yazar; daha yeni olan kazanır.
+// Kimlikler HTML özniteliklerine ve linklere girer; yedek dosyası ya da bulut dışarıdan geldiği için biçim denetlenir.
+const GECERLI_ID = /^[A-Za-z0-9_-]{1,64}$/;
+export const gecerliKayit = (k, depo = "") => !!k && typeof k === "object" && GECERLI_ID.test(k.id) && (k.profil == null || GECERLI_ID.test(k.profil)) && (k.gorsel == null || GECERLI_ID.test(k.gorsel)) &&
+  (depo !== "profiller" || k.renk == null || /^#[0-9a-f]{3,8}$/i.test(k.renk));
 export async function hamYaz(depo, kayitlar) {
   let yazilan = 0;
+  kayitlar = kayitlar.filter((k) => gecerliKayit(k, depo));
   await islem(depo, "readwrite", async (s) => {
     for (const k of kayitlar) {
       const eski = await iste(s.get(k.id));

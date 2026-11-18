@@ -1,8 +1,8 @@
 // Parça detayı: bilgiler, A1 giydim, A2 giyim başı maliyet, G5 durum, B3 teslim tarihi, G7 arşiv, düzenleme, fotoğraf.
 import * as veri from "../veri.js";
 import { yukle, giydim, giyimGeriAl } from "../durum.js";
-import { giyimBasiMaliyet, gunStr, gunFarki } from "../analiz.js";
-import { KATEGORI, RENK, MEVSIMLER, ORTAMLAR, DESENLER, DURUMLAR, DURUM, ARSIV_NEDENLERI, adBul } from "../sabitler.js";
+import { giyimBasiMaliyet, gunStr, gunFarki, yikamayaKalan } from "../analiz.js";
+import { KATEGORI, RENK, MEVSIMLER, ORTAMLAR, DESENLER, DURUMLAR, DURUM, ARSIV_NEDENLERI, YIKAMALAR, UTULER, BAKIM_EKLERI, adBul } from "../sabitler.js";
 import { k, para, tarihYaz, pencere, onayla, bildir, parcaGorsel, gorselleriDoldur, parcaAdi, kolaj, ikon, cipGrubu, cipleriBagla, cipOku } from "../ui.js";
 import { formHtml, formBagla, formOku } from "./parca-form.js";
 import { hazirla, arkaPlanKaldir } from "../gorsel.js";
@@ -28,19 +28,24 @@ export async function ciz(kok, [id]) {
     ["Ortam", (p.ortamlar || []).map((x) => adBul(ORTAMLAR, x)).join(", ")],
     ["Kumaş", p.kumas], ["Marka", p.marka], ["Beden", p.beden], ["Fiyat", para(p.fiyat)],
     ["Alış", tarihYaz(p.alisTarihi, { day: "numeric", month: "long", year: "numeric" })], ["Mağaza", p.magaza],
+    ["Nerede", p.konum],
+    ["Bakım", bakimMetni(p.bakim)],
+    ["Yıkama", p.yikamaSiklik ? `${p.yikamaSiklik} giyimde bir` : ""],
   ].filter(([, v]) => v);
+  const kalan = yikamayaKalan(p, await veri.ayarOku("giyinceKirli", false));
 
   kok.innerHTML = `
     <div class="detay-gorsel">${parcaGorsel(p, { buyuk: true })}</div>
     <div class="satir ara"><h2>${k(parcaAdi(p))}</h2>${p.arsiv ? `<span class="etiket hata">Arşivde: ${k(adBul(ARSIV_NEDENLERI, p.arsiv.neden))}</span>` : `<button class="etiket ${durum.hazir ? "iyi" : "uyari"}" style="border:0;cursor:pointer" id="durum-ac" type="button">${k(durum.ad)} ▾</button>`}</div>
     ${p.teslimTarihi && durum.hatirlat ? `<div class="uyari-kutu">${k(durum.ad)}: teslim ${tarihYaz(p.teslimTarihi)} (${teslimMetni(p.teslimTarihi)})</div>` : ""}
+    ${kalan != null && !p.arsiv ? `<p class="kucuk soluk" style="margin:0">Yıkamaya ${kalan} giyim kaldı</p>` : ""}
     ${p.arsiv ? "" : `<button class="dugme ${bugunGiyildi ? "" : "ana"} genis" type="button" id="giydim">${ikon.onay}${bugunGiyildi ? "Bugün giyildi · geri al" : "Bugün giydim"}</button>`}
     <div class="sayilar">
       <div class="sayi"><b>${g?.sayi || 0}</b><small>kez giyildi</small></div>
       <div class="sayi"><b>${g?.son ? gunFarki(g.son, gunStr()) : "—"}</b><small>${g?.son ? "gün önce" : "hiç giyilmedi"}</small></div>
       <div class="sayi"><b>${m ? para(m.maliyet) : "—"}</b><small>giyim başı maliyet</small></div>
     </div>
-    <dl class="bilgi">${bilgi.map(([a, v]) => `<dt>${k(a)}</dt><dd>${k(v)}</dd>`).join("")}${p.link ? `<dt>Link</dt><dd><a href="${k(p.link)}" target="_blank" rel="noopener">Ürün sayfası</a></dd>` : ""}</dl>
+    <dl class="bilgi">${bilgi.map(([a, v]) => `<dt>${k(a)}</dt><dd>${k(v)}</dd>`).join("")}${guvenliLink(p.link) ? `<dt>Link</dt><dd><a href="${k(p.link)}" target="_blank" rel="noopener">Ürün sayfası</a></dd>` : ""}</dl>
     ${p.not ? `<p style="margin:0;white-space:pre-wrap">${k(p.not)}</p>` : ""}
     <div class="satir">
       <button class="dugme" type="button" id="duzenle">Düzenle</button>
@@ -74,13 +79,33 @@ export async function ciz(kok, [id]) {
   kok.querySelector("#arsivle")?.addEventListener("click", () => arsivle(p));
   kok.querySelector("#arsivden")?.addEventListener("click", async () => { await veri.guncelle("parcalar", p.id, { arsiv: null }); bildir("Gardroba geri alındı"); yenile(); });
   kok.querySelector("#sil").onclick = async () => {
-    if (!(await onayla("Bu parça ve giyim kayıtlarındaki izi kalıcı olarak silinecek. Satıldıysa ya da bağışlandıysa arşive kaldırman istatistikleri korur.", { evet: "Sil", tehlike: true }))) return;
+    // Beğenilmeyen/gizli kombinler küçültülmez, silinir: küçülürse başka, gerçek bir kombini öneriden engellerdi.
+    const gorunen = kombinler.filter((x) => !x.gizli && !x.begenmedi);
+    const bozulan = gorunen.filter((x) => x.parcalar.length - 1 < 2);
+    if (!(await onayla(`Bu parça kalıcı olarak silinecek${gorunen.length ? ` ve ${gorunen.length} kombinden çıkarılacak${bozulan.length ? ` (${bozulan.length} kombin tek parçaya düştüğü için silinecek)` : ""}` : ""}. Satıldıysa ya da bağışlandıysa arşive kaldırman geçmişi korur.`, { evet: "Sil", tehlike: true }))) return;
     await veri.sil("parcalar", p.id);
+    for (const x of kombinler) {
+      const kalan = x.parcalar.filter((i) => i !== p.id);
+      if (kalan.length >= 2 && !x.gizli && !x.begenmedi) { await veri.guncelle("kombinler", x.id, { parcalar: kalan }); continue; }
+      await veri.sil("kombinler", x.id);
+      for (const pl of d.plan.filter((pl) => pl.kombin === x.id && pl.tarih >= gunStr())) await veri.sil("plan", pl.id);
+    }
     if (p.gorsel) await veri.gorselSil(p.gorsel);
     bildir("Silindi");
     git("gardrop");
   };
 }
+
+// B1
+function bakimMetni(b) {
+  if (!b) return "";
+  const l = [];
+  if (b.yikama) l.push(b.yikama === "yok" || b.yikama === "elde" ? adBul(YIKAMALAR, b.yikama) + (b.yikama === "elde" ? " yıkama" : "") : `${adBul(YIKAMALAR, b.yikama)} yıkama`);
+  if (b.utu) l.push(b.utu === "yok" ? "Ütülenmez" : `Ütü: ${adBul(UTULER, b.utu).toLocaleLowerCase("tr")}`);
+  for (const e of b.ekler || []) l.push(adBul(BAKIM_EKLERI, e));
+  return l.join(" · ");
+}
+const guvenliLink = (s) => /^https?:\/\//i.test(s || "");
 
 function teslimMetni(t) {
   const n = gunFarki(gunStr(), t);
@@ -128,6 +153,7 @@ async function durumPenceresi(p) {
       durumTarihi: yeni ? gunStr() : p.durumTarihi || gunStr(),
       teslimTarihi: v === "temiz" || v === "kirli" ? null : g.querySelector("#teslim").value || null,
       durumNotu: v === "temiz" || v === "kirli" ? "" : g.querySelector("#kime").value.trim(),
+      ...(v === "temiz" && yeni ? { kirliSayac: 0 } : {}),
     });
     pen.kapat(true);
     yenile();
